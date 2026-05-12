@@ -1,0 +1,11 @@
+redis
+websockets
+numpy
+fastapi
+uvicorn
+python-dotenv
+pandas
+psycopg2-binary
+python-multipart
+openpyxl
+fastapi-swagger-ui-theme
