@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAIOS-TRADE CORE | Market Intelligence</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0b0f19;
+            --card-bg: rgba(20, 27, 45, 0.7);
+            --neon-cyan: #00f2ff;
+            --neon-violet: #bc13fe;
+            --text-main: #e2e8f0;
+            --text-muted: #94a3b8;
+            --success: #10b981;
+            --danger: #ef4444;
+            --glass-border: rgba(255, 255, 255, 0.05);
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        body { 
+            background: radial-gradient(circle at 50% 50%, #111827 0%, #05070a 100%);
+            color: var(--text-main); 
+            height: 100vh; 
+            overflow: hidden; 
+            background-attachment: fixed;
+        }
+
+        body::before {
+            content: "";
+            position: absolute;
+            top: -50%; left: -50%; width: 200%; height: 200%;
+            background: transparent url('https://www.transparenttextures.com/patterns/carbon-fibre.png') repeat;
+            opacity: 0.05;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .dashboard-container {
+            display: grid;
+            grid-template-columns: 260px 1fr;
+            grid-template-rows: 80px 1fr;
+            height: 100vh;
+        }
+
+        .sidebar {
+            grid-row: 1 / 3;
+            background: rgba(13, 18, 30, 0.95);
+            border-right: 1px solid var(--glass-border);
+            padding: 2rem 1.5rem;
+            display: flex; flex-direction: column; gap: 2rem;
+        }
+
+        .brand {
+            font-size: 1.5rem; font-weight: 700; font-family: 'Outfit';
+            background: linear-gradient(45deg, var(--neon-cyan), var(--neon-violet));
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+        }
+
+        .nav-item {
+            padding: 0.75rem 1rem; border-radius: 8px; color: var(--text-muted);
+            cursor: pointer; transition: all 0.2s;
+        }
+        .nav-item:hover { background: rgba(255, 255, 255, 0.03); color: var(--text-main); }
+        .nav-item.active { background: rgba(0, 242, 255, 0.1); color: var(--neon-cyan); border: 1px solid rgba(0, 242, 255, 0.2); }
+
+        header {
+            grid-column: 2 / 3; display: flex; justify-content: space-between;
+            align-items: center; padding: 0 2.5rem; border-bottom: 1px solid var(--glass-border);
+        }
+
+        .btn {
+            padding: 0.5rem 1rem; border-radius: 6px; font-size: 0.8rem; font-weight: 700;
+            cursor: pointer; border: 1px solid transparent; font-family: 'Outfit';
+        }
+        .btn-success { background: rgba(16, 185, 129, 0.1); color: var(--success); border-color: var(--success); }
+        .btn-danger { background: rgba(239, 68, 68, 0.1); color: var(--danger); border-color: var(--danger); }
+        .btn-outline { background: transparent; color: var(--text-main); border-color: var(--glass-border); }
+
+        .status-pill {
+            display: flex; align-items: center; gap: 0.5rem; padding: 0.4rem 0.8rem;
+            background: rgba(255, 255, 255, 0.03); border-radius: 20px; border: 1px solid var(--glass-border); font-size: 0.8rem;
+        }
+
+        main { grid-column: 2 / 3; padding: 2rem; overflow-y: auto; }
+        .tab-content { display: none; }
+        .tab-content.active { display: grid; grid-template-columns: 2fr 1fr; gap: 2rem; }
+
+        .glass-card {
+            background: rgba(20, 27, 45, 0.4);
+            backdrop-filter: blur(12px);
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 1.5rem;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+            transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        }
+        .glass-card:hover {
+            transform: translateY(-5px);
+            border-color: rgba(0, 242, 255, 0.2);
+        }
+
+        .stats-grid { grid-column: 1 / 3; display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.5rem; margin-bottom: 2rem; }
+        .stat-val { font-size: 1.75rem; font-weight: 700; font-family: 'Outfit'; margin-top: 0.5rem; }
+        .stat-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-muted); letter-spacing: 1px; }
+
+        table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
+        th { text-align: left; padding: 0.75rem; font-size: 0.7rem; color: var(--text-muted); border-bottom: 1px solid var(--glass-border); }
+        td { padding: 1rem 0.75rem; border-bottom: 1px solid rgba(255, 255, 255, 0.02); font-size: 0.9rem; }
+
+        .bias-gauge {
+            width: 120px; height: 120px; border-radius: 50%; border: 3px solid var(--glass-border);
+            border-top-color: var(--neon-cyan); margin: 0 auto 1rem; display: flex; align-items: center; justify-content: center;
+            text-align: center; font-size: 0.85rem;
+        }
+        .empty-state { text-align: center; color: var(--text-muted); padding: 2rem 0; }
+    </style>
+</head>
+<body>
+    <div class="dashboard-container">
+        <aside class="sidebar">
+            <div class="brand">SAIOS CORE</div>
+            <nav id="sidebar-nav">
+                <div class="nav-item active" onclick="switchTab('overview')">Overview</div>
+                <div class="nav-item" onclick="switchTab('signals')">Alpha Signals</div>
+                <div class="nav-item" onclick="switchTab('vwapretest')">VWAP Retest</div>
+                <div class="nav-item" onclick="switchTab('risk')">Risk Sentinel</div>
+                <div class="nav-item" onclick="switchTab('performance')">Performance</div>
+            </nav>
+            <div style="margin-top: auto; padding: 1rem; border: 1px solid var(--danger); border-radius: 8px;">
+                <div class="stat-label">Daily Risk</div>
+                <div id="risk-pct" style="font-family: 'Outfit';">₹0 / ₹-20,000</div>
+            </div>
+        </aside>
+
+        <header>
+            <div style="display: flex; gap: 1rem;">
+                <button onclick="sendCommand('START_TRADING')" class="btn btn-success">▶ START</button>
+                <button onclick="toggleForcePaper()" id="force-paper-btn" class="btn btn-outline">🧪 FORCE PAPER: OFF</button>
+                <button onclick="sendCommand('PAUSE_TRADING')" class="btn btn-outline">⏸ PAUSE</button>
+                <button onclick="if(confirm('Shutdown system?')) sendCommand('SHUTDOWN_SYSTEM')" class="btn btn-danger">🛑 SHUTDOWN</button>
+            </div>
+            <div style="display: flex; gap: 1rem;">
+                <div class="status-pill">MARKET: <span id="market-status" style="color: var(--text-muted);">CHECKING...</span></div>
+                <div class="status-pill">MODE: <span id="mode-label" style="color: var(--neon-cyan);">PAPER</span></div>
+                <div class="status-pill">IST: <span id="clock">00:00:00</span></div>
+            </div>
+        </header>
+
+        <main>
+            <!-- ═══ OVERVIEW TAB ═══ -->
+            <div id="overview" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="glass-card"><div class="stat-label">Session P&L</div><div id="pnl-val" class="stat-val">₹0.00</div></div>
+                    <div class="glass-card"><div class="stat-label">Win Rate</div><div id="win-val" class="stat-val">0%</div></div>
+                    <div class="glass-card"><div class="stat-label">Trades Today</div><div id="trade-val" class="stat-val">0</div></div>
+                    <div class="glass-card"><div class="stat-label">Ticks Processed</div><div id="tick-val" class="stat-val">0</div></div>
+                </div>
+
+                <div class="glass-card">
+                    <h3>Live Positions</h3>
+                    <table>
+                        <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>LTP</th><th>P&L</th><th>SL</th></tr></thead>
+                        <tbody id="pos-table"><tr><td colspan="6" class="empty-state">No open positions</td></tr></tbody>
+                    </table>
+                </div>
+
+                <div class="glass-card">
+                    <h3>Market Intelligence</h3>
+                    <div class="bias-gauge"><div id="bias-val">NEUTRAL</div></div>
+                    <div style="text-align:center; margin-top:1rem;">
+                        <div class="stat-label">Index Trades: <span id="idx-trades">0</span> / 8</div>
+                        <div class="stat-label" style="margin-top:0.3rem;">Stock Trades: <span id="stk-trades">0</span> / 15</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ ALPHA SIGNALS TAB ═══ -->
+            <div id="signals" class="tab-content">
+                <div class="glass-card" style="grid-column: 1 / 3;">
+                    <h2>Scanner Results</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 1rem;">Live feed from Apex Scanner — refreshes every 30s</p>
+                    <table>
+                        <thead><tr><th>Symbol</th><th>Direction</th><th>Score</th><th>Flag</th><th>Price</th></tr></thead>
+                        <tbody id="all-signals-table">
+                            <tr><td colspan="5" class="empty-state">Waiting for scanner data...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ═══ VWAP RETEST TAB ═══ -->
+            <div id="vwapretest" class="tab-content">
+                <div class="glass-card" style="grid-column: 1 / 3;">
+                    <h2>🎯 Monthly VWAP Retest Engine</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 1rem;">Monitoring high-conviction institutional retest zones</p>
+                    <div class="stats-grid" style="margin: 1.5rem 0;">
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Candidates</div>
+                            <div class="stat-val" id="vr-candidates">0</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Signals Sent</div>
+                            <div class="stat-val" id="vr-signaled">0</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Scans Done</div>
+                            <div class="stat-val" id="vr-scans">0</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Last Scan</div>
+                            <div class="stat-val" id="vr-lastscan" style="font-size: 1.2rem;">---</div>
+                        </div>
+                    </div>
+                    <table>
+                        <thead><tr><th>Symbol</th><th>LTP</th><th>MVWAP</th><th>Distance</th><th>Vol Ratio</th><th>Rally %</th><th>Status</th></tr></thead>
+                        <tbody id="vwap-retest-table">
+                            <tr><td colspan="7" class="empty-state">Scanning for institutional candidates...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- ═══ RISK SENTINEL TAB ═══ -->
+            <div id="risk" class="tab-content">
+                <div class="glass-card" style="grid-column: 1 / 3;">
+                    <h2>Risk Sentinel</h2>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 2rem; margin-top: 1.5rem;">
+                        <div>
+                            <h4 style="color: var(--neon-cyan);">Session P&L</h4>
+                            <div style="font-size: 2rem; margin: 1rem 0;" id="risk-drawdown">₹0.00</div>
+                            <p style="font-size: 0.8rem; color: var(--text-muted);">Limit: ₹-20,000 (2% of ₹10L)</p>
+                        </div>
+                        <div>
+                            <h4 style="color: var(--neon-violet);">Regime Mode</h4>
+                            <div style="font-size: 2rem; margin: 1rem 0;" id="risk-sizing-mode">REGULAR (1x)</div>
+                            <p style="font-size: 0.8rem; color: var(--text-muted);">Auto-adjusts with market regime</p>
+                        </div>
+                        <div>
+                            <h4 style="color: var(--success);">System Status</h4>
+                            <div style="font-size: 2rem; margin: 1rem 0;" id="risk-system-status">ACTIVE</div>
+                            <p style="font-size: 0.8rem; color: var(--text-muted);">Halts at daily loss limit</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ═══ PERFORMANCE TAB ═══ -->
+            <div id="performance" class="tab-content">
+                <div class="glass-card" style="grid-column: 1 / 3;">
+                    <h2>Lifetime Performance (from DB)</h2>
+                    <p style="color: var(--text-muted); margin-bottom: 1rem;">Calculated from algo_trades table — updates every 30s</p>
+                    <div class="stats-grid" style="margin-top: 1.5rem;">
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Profit Factor</div>
+                            <div class="stat-val" id="perf-profit-factor">—</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Avg Winner</div>
+                            <div class="stat-val" id="perf-avg-winner">—</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Avg Loser</div>
+                            <div class="stat-val" id="perf-avg-loser">—</div>
+                        </div>
+                        <div class="glass-card" style="background: rgba(0,0,0,0.2);">
+                            <div class="stat-label">Sharpe Ratio</div>
+                            <div class="stat-val" id="perf-sharpe">—</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script>
+        let forcePaperEnabled = false;
+        const ws = new WebSocket(`ws://${window.location.host}/ws`);
+
+        // ═══ Tab Switching ═══
+        function switchTab(id) {
+            document.querySelectorAll('.tab-content').forEach(t => t.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            event.target.classList.add('active');
+            // Load scanner data when switching to signals tab
+            if (id === 'signals') fetchScannerResults();
+        }
+
+        // ═══ API Calls ═══
+        async function sendCommand(command) {
+            try {
+                const res = await fetch('/api/system/trading_status', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({command})
+                });
+                const data = await res.json();
+                console.log(`Command ${command}:`, data.message);
+            } catch(e) { console.error(e); }
+        }
+
+        async function toggleForcePaper() {
+            forcePaperEnabled = !forcePaperEnabled;
+            const btn = document.getElementById('force-paper-btn');
+            btn.innerText = `🧪 FORCE PAPER: ${forcePaperEnabled ? 'ON' : 'OFF'}`;
+            btn.style.borderColor = forcePaperEnabled ? 'var(--neon-cyan)' : 'var(--glass-border)';
+            await fetch('/api/settings/toggle_force_paper', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: forcePaperEnabled})
+            });
+        }
+
+        // ═══ Scanner Results (Alpha Signals Tab) ═══
+        async function fetchScannerResults() {
+            try {
+                const res = await fetch('/api/scanner/results');
+                const data = await res.json();
+                const table = document.getElementById('all-signals-table');
+                if (data.symbols && data.symbols.length > 0) {
+                    table.innerHTML = data.symbols.map(s => `
+                        <tr>
+                            <td style="color: var(--neon-cyan); font-weight:700;">${s.symbol}</td>
+                            <td style="color: ${s.bias === 'BULLISH' ? 'var(--success)' : 'var(--danger)'}">${s.bias}</td>
+                            <td>${s.score}</td>
+                            <td>${s.flag || '—'}</td>
+                            <td>₹${s.last_price ? s.last_price.toFixed(2) : '—'}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    table.innerHTML = '<tr><td colspan="5" class="empty-state">No scanner results yet — next scan in progress</td></tr>';
+                }
+            } catch(e) { console.error('Scanner fetch error:', e); }
+        }
+
+        // ═══ Performance Stats ═══
+        async function updatePerformanceStats() {
+            try {
+                const res = await fetch('/api/performance/stats');
+                const d = await res.json();
+                if (d.status !== 'error') {
+                    document.getElementById('perf-profit-factor').innerText = d.profit_factor || '0';
+                    document.getElementById('perf-avg-winner').innerText = `₹${(d.avg_winner || 0).toLocaleString('en-IN')}`;
+                    document.getElementById('perf-avg-loser').innerText = `₹${(d.avg_loser || 0).toLocaleString('en-IN')}`;
+                    document.getElementById('perf-sharpe').innerText = d.sharpe || '0';
+                }
+            } catch(e) {}
+        }
+
+        // ═══ WebSocket Handler ═══
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+
+            // 1. Stats
+            if (data.stats) {
+                const pnl = data.stats.total_pnl || 0;
+                const pnlEl = document.getElementById('pnl-val');
+                pnlEl.innerText = `₹${pnl.toFixed(2)}`;
+                pnlEl.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+
+                document.getElementById('trade-val').innerText = data.stats.trades_today || 0;
+                const wr = (data.stats.win_rate || 0) * 100;
+                document.getElementById('win-val').innerText = `${wr.toFixed(0)}%`;
+                document.getElementById('tick-val').innerText = data.stats.ticks_processed || 0;
+
+                // Sidebar risk
+                document.getElementById('risk-pct').innerText = `₹${pnl.toFixed(0)} / ₹-20,000`;
+                document.getElementById('risk-pct').style.color = pnl < 0 ? 'var(--danger)' : 'var(--success)';
+
+                // Risk tab
+                const dd = document.getElementById('risk-drawdown');
+                dd.innerText = `₹${pnl.toFixed(2)}`;
+                dd.style.color = pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+
+                const sysStatus = document.getElementById('risk-system-status');
+                if (data.stats.halted) {
+                    sysStatus.innerText = '🛑 HALTED';
+                    sysStatus.style.color = 'var(--danger)';
+                } else {
+                    sysStatus.innerText = '✅ ACTIVE';
+                    sysStatus.style.color = 'var(--success)';
+                }
+            }
+
+            // 2. Market Status
+            if (data.market) {
+                const ms = document.getElementById('market-status');
+                ms.innerText = data.market.status;
+                ms.style.color = data.market.color;
+            }
+
+            // 3. Positions
+            if (data.positions && data.positions.positions) {
+                const table = document.getElementById('pos-table');
+                const pos = data.positions.positions;
+                if (pos.length > 0) {
+                    table.innerHTML = pos.map(p => `
+                        <tr>
+                            <td style="color: var(--neon-cyan); font-weight:700;">${p.symbol}</td>
+                            <td style="color: ${p.side === 'BUY' ? 'var(--success)' : 'var(--danger)'}">${p.side}</td>
+                            <td>₹${p.entry_price}</td>
+                            <td>₹${p.current_price}</td>
+                            <td style="color: ${p.pnl >= 0 ? 'var(--success)' : 'var(--danger)'}">₹${p.pnl}</td>
+                            <td>₹${p.sl}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    table.innerHTML = '<tr><td colspan="6" class="empty-state">No open positions</td></tr>';
+                }
+            }
+
+            // 4. Regime
+            if (data.regime) {
+                const bias = document.getElementById('bias-val');
+                const regime = data.regime.intraday || 'NEUTRAL';
+                const direction = data.regime.index_direction || 'NEUTRAL';
+
+                bias.innerHTML = `<span style="font-size:0.7rem; display:block; opacity:0.6;">${direction}</span>${regime}`;
+                bias.style.color = regime.includes('UP') || direction.includes('BULL') ? 'var(--success)' :
+                                  regime.includes('DOWN') || direction.includes('BEAR') ? 'var(--danger)' : 'var(--neon-cyan)';
+
+                // Mode label sync
+                if (data.regime.trading_mode) {
+                    document.getElementById('mode-label').innerText = data.regime.trading_mode;
+                }
+
+                // Risk tab sizing mode
+                document.getElementById('risk-sizing-mode').innerText =
+                    regime.includes('TREND') ? 'AGGRESSIVE (2x)' :
+                    regime.includes('VOLATILE') ? 'DEFENSIVE (0.5x)' : 'REGULAR (1x)';
+            }
+
+            // 5. VWAP Retest State
+            if (data.vwap_retest) {
+                const vr = data.vwap_retest;
+                document.getElementById('vr-candidates').innerText = vr.candidate_count || 0;
+                document.getElementById('vr-signaled').innerText = vr.signaled_count || 0;
+                document.getElementById('vr-scans').innerText = vr.scan_count || 0;
+                document.getElementById('vr-lastscan').innerText = vr.last_scan ? new Date(vr.last_scan).toLocaleTimeString() : '---';
+
+                const table = document.getElementById('vwap-retest-table');
+                if (vr.candidates && vr.candidates.length > 0) {
+                    table.innerHTML = vr.candidates.map(c => `
+                        <tr>
+                            <td style="color: var(--neon-cyan); font-weight:700;">${c.symbol}</td>
+                            <td>₹${c.ltp.toFixed(2)}</td>
+                            <td>₹${c.mvwap.toFixed(2)}</td>
+                            <td>${c.distance_pct}%</td>
+                            <td>${c.vol_ratio}x</td>
+                            <td style="color: var(--success)">${c.rally_pct}%</td>
+                            <td style="color: ${c.status === 'TRIGGERED' ? 'var(--neon-cyan)' : 'var(--text-muted)'}; font-weight: bold;">${c.status}</td>
+                        </tr>
+                    `).join('');
+                } else {
+                    table.innerHTML = '<tr><td colspan="7" class="empty-state">No candidates in retest zone currently</td></tr>';
+                }
+            }
+
+            // 6. Scanner data (populate signals tab if visible)
+            if (data.scanner && data.scanner.symbols) {
+                const table = document.getElementById('all-signals-table');
+                if (data.scanner.symbols.length > 0) {
+                    table.innerHTML = data.scanner.symbols.map(s => `
+                        <tr>
+                            <td style="color: var(--neon-cyan); font-weight:700;">${s.symbol}</td>
+                            <td style="color: ${s.bias === 'BULLISH' ? 'var(--success)' : 'var(--danger)'}">${s.bias}</td>
+                            <td>${s.score}</td>
+                            <td>${s.flag || '—'}</td>
+                            <td>₹${s.last_price ? s.last_price.toFixed(2) : '—'}</td>
+                        </tr>
+                    `).join('');
+                }
+            }
+        };
+
+        // ═══ Timers ═══
+        setInterval(() => {
+            document.getElementById('clock').innerText = new Date().toLocaleTimeString('en-GB', {timeZone:'Asia/Kolkata'});
+        }, 1000);
+
+        // Performance + scanner refresh every 30s (not every 1s!)
+        updatePerformanceStats();
+        setInterval(updatePerformanceStats, 30000);
+        setInterval(fetchScannerResults, 30000);
+    </script>
+</body>
+</html>

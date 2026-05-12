@@ -1,0 +1,36 @@
+<html>
+<head>
+<title>Algo OS Dashboard</title>
+</head>
+
+<body>
+
+<h1>Algo Trading OS</h1>
+
+<div id="risk"></div>
+<div id="stats"></div>
+<div id="signals"></div>
+
+<script>
+
+let ws = new WebSocket("ws://localhost:8000/ws")
+
+ws.onmessage = function(event){
+
+    let data = JSON.parse(event.data)
+
+    document.getElementById("risk").innerText =
+        "Risk: " + JSON.stringify(data.risk)
+
+    document.getElementById("stats").innerText =
+        "Stats: " + JSON.stringify(data.stats)
+
+    document.getElementById("signals").innerText =
+        "Signal: " + JSON.stringify(data.signal)
+
+}
+
+</script>
+
+</body>
+</html>

@@ -1,1 +1,1196 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TARA Pro | SaaS Trading Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&family=Inter:wght@400;500;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg-deep: #05070a;
+            --bg-main: #0b0f19;
+            --surface: #111827;
+            --surface-accent: #1f2937;
+            --primary: #38bdf8;
+            --secondary: #8b5cf6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --warning: #f59e0b;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --sidebar-width: 260px;
+        }
 
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background-color: var(--bg-main);
+            color: var(--text-main);
+            font-family: 'Inter', sans-serif;
+            display: flex;
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--bg-deep);
+            border-right: 1px solid rgba(255, 255, 255, 0.05);
+            display: flex;
+            flex-direction: column;
+            padding: 2rem 1.5rem;
+            position: fixed;
+            height: 100vh;
+        }
+
+        .logo {
+            font-family: 'Outfit', sans-serif;
+            font-weight: 800;
+            font-size: 1.5rem;
+            background: linear-gradient(to right, var(--primary), var(--secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 3rem;
+        }
+
+        .nav-item {
+            padding: 0.8rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            color: var(--text-muted);
+            transition: all 0.2s;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .nav-item:hover, .nav-item.active {
+            background: var(--surface-accent);
+            color: var(--text-main);
+        }
+
+        .nav-item.active {
+            border-left: 3px solid var(--primary);
+        }
+
+        /* Main Content */
+        .content {
+            margin-left: var(--sidebar-width);
+            flex-grow: 1;
+            padding: 2.5rem;
+            max-width: 1200px;
+        }
+
+        header {
+            margin-bottom: 2.5rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .badge {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--success);
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-size: 0.8rem;
+            font-weight: 600;
+            border: 1px solid rgba(16, 185, 129, 0.2);
+        }
+
+        /* Grid Layout */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--surface);
+            padding: 1.5rem;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .stat-label { color: var(--text-muted); font-size: 0.9rem; margin-bottom: 0.5rem; }
+        .stat-value { font-size: 1.8rem; font-weight: 700; font-family: 'Outfit', sans-serif; }
+        .stat-up { color: var(--success); font-size: 0.8rem; }
+        .stat-down { color: var(--danger); font-size: 0.8rem; }
+
+        .card {
+            background: var(--surface);
+            border-radius: 16px;
+            padding: 2rem;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+            margin-bottom: 2rem;
+        }
+
+        .card-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        /* Chart Area */
+        .chart-container {
+            height: 300px;
+            width: 100%;
+        }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1rem;
+        }
+
+        th {
+            text-align: left;
+            color: var(--text-muted);
+            font-weight: 500;
+            font-size: 0.85rem;
+            padding: 1rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        td {
+            padding: 1rem;
+            font-size: 0.9rem;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        /* Section Visibility */
+        .section { display: none; margin-top: 1rem; }
+        .section.active { display: block; }
+
+        /* Generic UI */
+        textarea {
+            width: 100%; height: 150px; background: #000; border: 1px solid #333;
+            color: #fff; padding: 1rem; border-radius: 8px; margin-bottom: 1rem;
+        }
+
+        button {
+            background: var(--primary); color: #000; border: none; padding: 0.8rem 1.5rem;
+            border-radius: 8px; font-weight: 700; cursor: pointer; transition: 0.2s;
+        }
+
+        button:hover { opacity: 0.9; transform: translateY(-1px); }
+
+        .loader {
+            display: inline-block; width: 12px; height: 12px; border: 2px solid #fff;
+            border-top: 2px solid transparent; border-radius: 50%;
+            animation: spin 1s linear infinite; margin-left: 8px;
+        }
+        @keyframes spin { 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+    <nav class="sidebar">
+        <div class="logo">TARA PRO</div>
+        <div class="nav-item active" onclick="showSection('overview')">
+            <span>🏠</span> Overview
+        </div>
+        <div class="nav-item" onclick="showSection('analyzer')">
+            <span>🔍</span> Matrix Analyzer
+        </div>
+        <div class="nav-item" onclick="showSection('scanner')">
+            <span>📡</span> Apex Scanner
+        </div>
+        <div class="nav-item" onclick="showSection('vwapretest')">
+            <span>🎯</span> VWAP Retest
+        </div>
+        <div class="nav-item" onclick="showSection('reports')">
+            <span>📈</span> Performance Reports
+        </div>
+        <div class="nav-item" onclick="showSection('journal')">
+            <span>📚</span> Trade Journal
+        </div>
+        <div class="nav-item" onclick="showSection('analytics')">
+            <span>🧠</span> Analytics & AI
+        </div>
+        <div style="margin-top: auto;">
+            <div id="regimeBadge" style="font-size:0.7rem; padding:4px 8px; border-radius:6px; background:var(--surface-accent); color:var(--text-muted); margin-bottom:8px; text-align:center;">Regime: NEUTRAL</div>
+            <div style="font-size: 0.75rem; color: var(--text-muted);">Algo OS v5.0 | Connected</div>
+        </div>
+    </nav>
+
+    <div class="content">
+        <!-- OVERVIEW SECTION -->
+        <div id="overview" class="section active">
+            <header>
+                <div>
+                    <h2>Market Intelligence</h2>
+                    <p style="color: var(--text-muted);">Real-time institutional liquidity flow</p>
+                </div>
+                <div style="display:flex; gap:10px; align-items:center;">
+                    <!-- Engine Execution Controls -->
+                    <button id="tradingStatusBtn" onclick="toggleTradingStatus()" style="background:var(--warning); color:#000; padding: 0.4rem 1rem; font-size: 0.85rem; display:flex; align-items:center;">
+                        ⏸ Pause Trading
+                    </button>
+                    <button id="continueTradingBtn" onclick="continueTrading()" style="display:none; background:var(--success); color:#fff; padding: 0.4rem 1rem; font-size: 0.85rem; align-items:center; border: 2px solid #fff;">
+                        🚀 Continue (+25 Trades)
+                    </button>
+                    <button onclick="systemShutdown()" style="background:transparent; border:1px solid var(--danger); color:var(--danger); padding: 0.4rem 1rem; font-size: 0.85rem; display:flex; align-items:center;">
+                        ⏻ Shutdown OS
+                    </button>
+                    <div id="tradingModeToggle" style="background:var(--surface-accent); padding:5px; border-radius:8px; display:flex; cursor:pointer;" onclick="toggleTradingMode()">
+                        <div id="btnPaper" style="padding: 0.4rem 1rem; border-radius:6px; background:var(--primary); color:#000; font-weight:bold;">📝 PAPER</div>
+                        <div id="btnLive" style="padding: 0.4rem 1rem; border-radius:6px; color:var(--text-muted);">🔴 LIVE</div>
+                    </div>
+                    <div id="marketStatusBadge" class="badge" style="background:rgba(239, 68, 68, 0.1); color:var(--danger); border-color:rgba(239, 68, 68, 0.2);">Market: CLOSED</div>
+                    <div class="badge">Live Connection: Stabilized</div>
+                </div>
+            </header>
+
+            <div class="dashboard-grid">
+                <div class="stat-card" style="border-bottom: 3px solid var(--danger);">
+                    <div class="stat-label">🔴 LIVE P&L</div>
+                    <div id="ov-live-pnl" class="stat-value">₹0.00</div>
+                    <div class="stat-up">Live trades</div>
+                </div>
+                <div class="stat-card" style="border-bottom: 3px solid var(--primary);">
+                    <div class="stat-label">📝 PAPER P&L</div>
+                    <div id="ov-paper-pnl" class="stat-value">₹0.00</div>
+                    <div class="stat-up">Paper trades</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Win Rate (Live)</div>
+                    <div id="ov-winrate" class="stat-value">0%</div>
+                    <div class="stat-up">Daily Avg</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Total Trades</div>
+                    <div id="ov-trades" class="stat-value">0</div>
+                    <div class="stat-muted">Current session</div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header">
+                    <h3>Equity Curve</h3>
+                    <select onchange="fetchChartData(this.value)" style="background:transparent; color:#fff; border:1px solid #333; padding:4px;">
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                    </select>
+                </div>
+                <div class="chart-container">
+                    <canvas id="pnlChart"></canvas>
+                </div>
+            </div>
+
+            <!-- LIVE TRADE BROADCAST -->
+            <div class="card" style="border: 1px solid var(--primary); box-shadow: 0 0 15px rgba(56, 189, 248, 0.1);">
+                <div class="card-header">
+                    <h3>🔴 LIVE Trades Broadcast</h3>
+                    <div class="badge" style="animation: pulse 2s infinite;">System Active</div>
+                </div>
+                <table id="liveTradesTable">
+                    <thead>
+                        <tr>
+                            <th>SYMBOL</th>
+                            <th>SIDE</th>
+                            <th>ENTRY</th>
+                            <th>CURRENT PNL</th>
+                            <th>TARGET/STOP</th>
+                        </tr>
+                    </thead>
+                    <tbody id="liveTradesBody">
+                        <tr><td colspan="5" style="text-align:center;">Waiting for new execution...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <!-- RECENT CLOSED TRADES -->
+            <div class="card">
+                <div class="card-header">
+                    <h3>📓 Recent Closed Trades</h3>
+                    <button onclick="loadTradeHistory()" style="padding: 0.4rem 1rem; font-size: 0.8rem; background: transparent; color: var(--primary); border: 1px solid var(--primary);">↻ Refresh</button>
+                </div>
+                <div style="max-height: 400px; overflow-y: auto;">
+                    <table id="closedTradesTable">
+                        <thead>
+                            <tr>
+                                <th onclick="sortTable(0)" style="cursor:pointer" title="Sort by Time">TIME ↕</th>
+                                <th onclick="sortTable(1)" style="cursor:pointer" title="Sort by Symbol">SYMBOL ↕</th>
+                                <th onclick="sortTable(2)" style="cursor:pointer" title="Sort by Side">SIDE ↕</th>
+                                <th onclick="sortTable(3)" style="cursor:pointer" title="Sort by Entry">ENTRY ↕</th>
+                                <th onclick="sortTable(4)" style="cursor:pointer" title="Sort by Exit">EXIT ↕</th>
+                                <th onclick="sortTable(5)" style="cursor:pointer" title="Sort by PnL">PNL ↕</th>
+                                <th onclick="sortTable(6)" style="cursor:pointer" title="Sort by Reason">REASON ↕</th>
+                            </tr>
+                        </thead>
+                        <tbody id="closedTradesBody">
+                            <tr><td colspan="7" style="text-align:center; color: var(--text-muted);">No recent trades found in database</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+            <style>
+                @keyframes pulse {
+                    0% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
+                    70% { box-shadow: 0 0 0 10px rgba(239, 68, 68, 0); }
+                    100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0); }
+                }
+            </style>
+        </div>
+
+        <!-- ANALYZER SECTION -->
+        <div id="analyzer" class="section">
+            <h2>Institutional Matrix Analyzer</h2>
+            <div class="card" style="margin-top:1.5rem;">
+                <label>Paste Option Chain Matrix</label>
+                <textarea id="matrixData" placeholder="Paste your Excel/CSV rows here..."></textarea>
+                <button id="analyzeBtn">Run Analysis <div id="loader" class="loader" style="display:none;"></div></button>
+                
+                <div id="analysisResult" style="margin-top:2rem; display:none; padding:1.5rem; border-radius:12px; background: rgba(0,0,0,0.3);">
+                    <h3 id="res-title">---</h3>
+                    <p id="res-desc" style="margin:1rem 0; color:var(--text-muted);"></p>
+                    <ul id="res-reasons" style="list-style: none;"></ul>
+                </div>
+            </div>
+        </div>
+
+        <!-- SCANNER SECTION -->
+        <div id="scanner" class="section">
+            <h2>Apex Watchlist Scanner</h2>
+            <div class="card" style="margin-top:1.5rem;">
+                <div style="display:flex; justify-content:space-between; align-items:center;">
+                    <div>
+                        <p style="font-size:0.9rem; color:var(--text-muted);">Auto-running every 10 min</p>
+                    </div>
+                    <div style="display:flex; gap:10px;">
+                        <button onclick="sendScannerCommand('FETCH_NOW')">Sync Now</button>
+                        <button style="background:var(--surface-accent); color:#fff;" onclick="promptInterval()">Interval Settings</button>
+                    </div>
+                </div>
+                
+                <table id="scannerTable">
+                    <thead>
+                        <tr>
+                            <th>SYMBOL</th>
+                            <th>LTP</th>
+                            <th>FLAG</th>
+                            <th>SIGNAL</th>
+                            <th>BIAS</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scannerBody">
+                        <tr><td colspan="5" style="text-align:center;">Listening for market scans...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- VWAP RETEST SECTION -->
+        <div id="vwapretest" class="section">
+            <h2>🎯 Stock VWAP Retest Engine</h2>
+            <div class="dashboard-grid" style="margin-top:1.5rem;">
+                <div class="stat-card"><div class="stat-label">Candidates</div><div id="vr-candidates" class="stat-value">0</div></div>
+                <div class="stat-card"><div class="stat-label">Signals Sent</div><div id="vr-signaled" class="stat-value">0</div></div>
+                <div class="stat-card"><div class="stat-label">Scans Done</div><div id="vr-scans" class="stat-value">0</div></div>
+                <div class="stat-card"><div class="stat-label">Last Scan</div><div id="vr-lastscan" class="stat-value" style="font-size:1rem;">---</div></div>
+            </div>
+            <div class="card" style="margin-top:1rem;">
+                <div class="card-header">
+                    <h3>Active Candidates (Monthly VWAP Retest Zone)</h3>
+                    <div class="badge" style="background:rgba(139,92,246,0.1); color:var(--secondary); border-color:rgba(139,92,246,0.3);">Live Monitoring</div>
+                </div>
+                <table><thead><tr>
+                    <th>SYMBOL</th><th>LTP</th><th>MVWAP</th><th>Distance</th><th>Vol Ratio</th><th>Rally%</th><th>Status</th>
+                </tr></thead>
+                <tbody id="vwapRetestBody">
+                    <tr><td colspan="7" style="text-align:center; color:var(--text-muted);">Engine scanning for candidates...</td></tr>
+                </tbody></table>
+            </div>
+        </div>
+
+        <!-- REPORTS SECTION -->
+        <div id="reports" class="section">
+            <h2>Performance Ledger</h2>
+            <div class="card" style="margin-top:1.5rem;">
+                <div class="card-header">
+                    <div style="display:flex; gap:1rem;">
+                        <button id="btn-rep-daily" class="rep-btn active-rep" onclick="loadReport('daily')">Daily</button>
+                        <button id="btn-rep-weekly" class="rep-btn" onclick="loadReport('weekly')">Weekly</button>
+                        <button id="btn-rep-monthly" class="rep-btn" onclick="loadReport('monthly')">Monthly</button>
+                    </div>
+                </div>
+                <table id="reportTable">
+                    <thead>
+                        <tr>
+                            <th id="th-date">DATE</th>
+                            <th>TRADES</th>
+                            <th>WIN RATE</th>
+                            <th>PNL</th>
+                        </tr>
+                    </thead>
+                    <tbody id="reportBody">
+                        <!-- Filled by JS -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- TRADE JOURNAL SECTION -->
+        <div id="journal" class="section">
+            <h2>📚 Professional Trade Journal</h2>
+            <div style="display:flex; gap:10px; margin:1.5rem 0; flex-wrap:wrap; align-items:center;">
+                <button class="jnl-btn active-jnl" id="jnl-today" onclick="loadJournal('today')" style="padding:0.5rem 1.2rem; font-size:0.85rem;">Today</button>
+                <button class="jnl-btn" id="jnl-yesterday" onclick="loadJournal('yesterday')" style="padding:0.5rem 1.2rem; font-size:0.85rem; background:var(--surface-accent); color:#fff;">Yesterday</button>
+                <button class="jnl-btn" id="jnl-week" onclick="loadJournal('week')" style="padding:0.5rem 1.2rem; font-size:0.85rem; background:var(--surface-accent); color:#fff;">This Week</button>
+                <button class="jnl-btn" id="jnl-month" onclick="loadJournal('month')" style="padding:0.5rem 1.2rem; font-size:0.85rem; background:var(--surface-accent); color:#fff;">This Month</button>
+                <div style="display:flex; gap:5px; align-items:center; margin-left:auto;">
+                    <input type="date" id="jnl-start" style="background:var(--surface-accent); border:1px solid #333; color:#fff; padding:6px 10px; border-radius:6px; font-size:0.85rem;">
+                    <span style="color:var(--text-muted);">to</span>
+                    <input type="date" id="jnl-end" style="background:var(--surface-accent); border:1px solid #333; color:#fff; padding:6px 10px; border-radius:6px; font-size:0.85rem;">
+                    <button onclick="loadJournal('custom')" style="padding:0.5rem 1rem; font-size:0.85rem; background:var(--secondary); color:#fff;">🔍 Search</button>
+                </div>
+            </div>
+
+            <!-- Summary Cards -->
+            <div class="dashboard-grid" style="margin-bottom:1.5rem;">
+                <div class="stat-card" style="border-bottom:3px solid var(--primary);">
+                    <div class="stat-label">Total Trades</div>
+                    <div id="jnl-total" class="stat-value">0</div>
+                </div>
+                <div class="stat-card" style="border-bottom:3px solid var(--success);">
+                    <div class="stat-label">Net P&L</div>
+                    <div id="jnl-pnl" class="stat-value">₹0</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Win Rate</div>
+                    <div id="jnl-wr" class="stat-value">0%</div>
+                    <div style="display:flex; gap:8px; font-size:0.8rem; margin-top:4px;">
+                        <span style="color:var(--success);">W: <span id="jnl-wins">0</span></span>
+                        <span style="color:var(--danger);">L: <span id="jnl-losses">0</span></span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Avg P&L / Trade</div>
+                    <div id="jnl-avg" class="stat-value">₹0</div>
+                    <div style="display:flex; gap:12px; font-size:0.75rem; margin-top:4px;">
+                        <span style="color:var(--success);">Best: <span id="jnl-best">₹0</span></span>
+                        <span style="color:var(--danger);">Worst: <span id="jnl-worst">₹0</span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trade Table -->
+            <div class="card" style="padding:1rem 1.5rem;">
+                <div class="card-header">
+                    <h3>📄 Trade Entries</h3>
+                    <div id="jnl-range-label" style="color:var(--text-muted); font-size:0.85rem;">Showing: Today</div>
+                </div>
+                <div style="max-height:500px; overflow-y:auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th style="width:60px;">#</th>
+                                <th>TIMESTAMP</th>
+                                <th>SYMBOL</th>
+                                <th>SIDE</th>
+                                <th>STRATEGY</th>
+                                <th>ENTRY</th>
+                                <th>EXIT</th>
+                                <th>QTY</th>
+                                <th>P&L</th>
+                                <th>REASON</th>
+                            </tr>
+                        </thead>
+                        <tbody id="journalBody">
+                            <tr><td colspan="10" style="text-align:center; color:var(--text-muted); padding:2rem;">Select a date range to load trade journal</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- ANALYTICS SECTION -->
+        <div id="analytics" class="section">
+            <h2>🧠 Self-Learning Analytics</h2>
+            <p style="color:var(--text-muted); margin-bottom:1.5rem;">AI-driven performance insights and adaptive recommendations from historical trade data</p>
+
+            <!-- AI Recommendations -->
+            <div class="card" style="border:1px solid var(--secondary); margin-bottom:1.5rem;">
+                <div class="card-header">
+                    <h3>💡 AI Recommendations</h3>
+                    <button onclick="loadAnalytics()" style="padding:0.4rem 1rem; font-size:0.8rem; background:var(--secondary); color:#fff;">↻ Refresh Insights</button>
+                </div>
+                <div id="aiRecommendations" style="min-height:60px;">
+                    <p style="color:var(--text-muted);">Loading analytics...</p>
+                </div>
+            </div>
+
+            <!-- Strategy Performance -->
+            <div class="card">
+                <h3 style="margin-bottom:1rem;">Strategy Performance Breakdown</h3>
+                <table>
+                    <thead><tr><th>STRATEGY</th><th>TRADES</th><th>WIN RATE</th><th>AVG P&L</th><th>TOTAL P&L</th></tr></thead>
+                    <tbody id="strategyPerfBody"><tr><td colspan="5" style="text-align:center; color:var(--text-muted);">Loading...</td></tr></tbody>
+                </table>
+            </div>
+
+            <!-- Symbol Performance -->
+            <div class="card">
+                <h3 style="margin-bottom:1rem;">Top Performing Symbols</h3>
+                <table>
+                    <thead><tr><th>SYMBOL</th><th>TRADES</th><th>AVG P&L</th><th>TOTAL P&L</th></tr></thead>
+                    <tbody id="symbolPerfBody"><tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Loading...</td></tr></tbody>
+                </table>
+            </div>
+
+            <!-- Exit Analysis + Hourly -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1.5rem;">
+                <div class="card">
+                    <h3 style="margin-bottom:1rem;">Exit Reason Analysis</h3>
+                    <table>
+                        <thead><tr><th>REASON</th><th>COUNT</th><th>AVG P&L</th></tr></thead>
+                        <tbody id="exitAnalysisBody"><tr><td colspan="3" style="text-align:center; color:var(--text-muted);">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+                <div class="card">
+                    <h3 style="margin-bottom:1rem;">Hourly Performance (IST)</h3>
+                    <table>
+                        <thead><tr><th>HOUR</th><th>TRADES</th><th>AVG P&L</th></tr></thead>
+                        <tbody id="hourlyBody"><tr><td colspan="3" style="text-align:center; color:var(--text-muted);">Loading...</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // -- CORE NAVIGATION --
+        function showSection(id) {
+            document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
+            document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+            
+            document.getElementById(id).classList.add('active');
+            event.currentTarget.classList.add('active');
+            
+            if(id === 'reports') {
+                console.log('Loading reports...');
+                loadReport('daily');
+            }
+            if(id === 'scanner') loadScannerResults();
+            if(id === 'journal') loadJournal('today');
+            if(id === 'analytics') loadAnalytics();
+        }
+
+        // -- MATRIX ANALYZER --
+        document.getElementById('analyzeBtn').onclick = async () => {
+            const data = document.getElementById('matrixData').value;
+            if(!data) return;
+            
+            document.getElementById('loader').style.display = 'inline-block';
+            try {
+                const res = await fetch('/api/paste', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'text/plain'},
+                    body: data
+                });
+                const json = await res.json();
+                
+                const box = document.getElementById('analysisResult');
+                box.style.display = 'block';
+                document.getElementById('res-title').innerText = json.action;
+                document.getElementById('res-desc').innerText = json.reasons[0] || 'Processed';
+                
+                const list = document.getElementById('res-reasons');
+                list.innerHTML = json.reasons.map(r => `<li style="margin-bottom:5px;">• ${r}</li>`).join('');
+                
+                box.style.borderLeft = `4px solid ${json.action.includes('LONG') ? 'var(--success)' : 'var(--warning)'}`;
+            } finally {
+                document.getElementById('loader').style.display = 'none';
+            }
+        };
+
+        // -- TRADE HISTORY --
+        async function loadTradeHistory() {
+            try {
+                const res = await fetch('/api/trades/history');
+                const data = await res.json();
+                
+                const tbody = document.getElementById('closedTradesBody');
+                if(!data || !data.trades || data.trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center; color: var(--text-muted);">No recent trades found in database</td></tr>';
+                    return;
+                }
+                
+                tbody.innerHTML = data.trades.map(t => {
+                    const isBuy = t.side === 'BUY';
+                    const sideColor = isBuy ? 'var(--success)' : 'var(--danger)';
+                    const sideText = isBuy ? 'LONG (BUY)' : 'SHORT (SELL)';
+                    const pnlColor = t.pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                    const timeOnly = t.timestamp ? new Date(t.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'}) : '---';
+                    
+                    return `
+                    <tr>
+                        <td style="color:var(--text-muted); font-size:0.85em;">${timeOnly}</td>
+                        <td><strong style="color:var(--text-main)">${t.symbol}</strong></td>
+                        <td style="color:${sideColor}; font-weight:bold;">${sideText}</td>
+                        <td>₹${t.entry_price ? t.entry_price.toFixed(2) : '---'}</td>
+                        <td>₹${t.exit_price ? t.exit_price.toFixed(2) : '---'}</td>
+                        <td style="color:${pnlColor}; font-weight:bold;">₹${t.pnl ? t.pnl.toFixed(2) : '0.00'}</td>
+                        <td><span class="badge" style="background:var(--surface-accent); color:var(--text-muted); border:none;">${t.reason || 'SYSTEM'}</span></td>
+                    </tr>`;
+                }).join('');
+            } catch(e) {
+                console.error('Failed to load trade history', e);
+            }
+        }
+
+        // -- SCANNER --
+        async function loadScannerResults() {
+            try {
+                const res = await fetch('/api/scanner/results');
+                const data = await res.json();
+                if(data && data.symbols && data.symbols.length > 0) {
+                    renderScannerTable(data);
+                }
+            } catch(e) { console.log('Scanner fetch error:', e); }
+        }
+
+        function renderScannerTable(data) {
+            const body = document.getElementById('scannerBody');
+            if(!data.symbols || data.symbols.length === 0) {
+                body.innerHTML = '<tr><td colspan="5" style="text-align:center;">No signals found in last scan</td></tr>';
+                return;
+            }
+            body.innerHTML = data.symbols.map(s => `
+                <tr>
+                    <td><strong>${s.symbol}</strong></td>
+                    <td>₹${s.last_price ? s.last_price.toLocaleString('en-IN', {minimumFractionDigits: 2, maximumFractionDigits: 2}) : '---'}</td>
+                    <td><span class="badge" style="background:rgba(56,189,248,0.1); color:var(--primary);">${s.flag}</span></td>
+                    <td>${s.signal}</td>
+                    <td style="color: ${s.bias === 'BULLISH' ? 'var(--success)' : 'var(--danger)'}; font-weight:700;">
+                        ${s.bias}
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        async function sendScannerCommand(cmd, minutes=10) {
+            await fetch('/api/scanner/command', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({command: cmd, minutes: minutes})
+            });
+            alert('Command dispatched to Algo Cluster');
+        }
+
+        function promptInterval() {
+            const m = prompt('Enter auto-fetch interval (minutes):', '10');
+            if(m) sendScannerCommand('SET_INTERVAL', parseInt(m));
+        }
+
+        // -- REPORTING --
+        async function loadReport(timeframe) {
+            document.querySelectorAll('.rep-btn').forEach(btn => {
+                btn.style.background = 'var(--surface-accent)';
+                btn.style.color = '#fff';
+            });
+            const activeBtn = document.getElementById('btn-rep-' + timeframe);
+            if (activeBtn) {
+                activeBtn.style.background = 'var(--primary)';
+                activeBtn.style.color = '#000';
+            }
+
+            const res = await fetch(`/api/reports/${timeframe}`);
+            const data = await res.json();
+            
+            const body = document.getElementById('reportBody');
+            document.getElementById('th-date').innerText = timeframe.toUpperCase();
+            
+            body.innerHTML = data.map(r => `
+                <tr>
+                    <td>${r.report_date || (r.year + ' W' + r.week) || (r.year + ' M' + r.month)}</td>
+                    <td>${r.total_trades}</td>
+                    <td>${r.win_rate}%</td>
+                    <td style="color: ${r.total_pnl >= 0 ? 'var(--success)' : 'var(--danger)'}; font-weight:700;">
+                        ₹${parseFloat(r.total_pnl).toLocaleString()}
+                    </td>
+                </tr>
+            `).join('');
+        }
+
+        // -- CHARTS --
+        let pnlChart;
+        async function fetchChartData(timeframe = 'daily') {
+            const res = await fetch(`/api/reports/${timeframe}`);
+            const data = await res.json();
+            
+            const labels = data.map(r => r.report_date || (r.year + '-' + (r.week || r.month))).reverse();
+            const values = data.map(r => r.total_pnl).reverse();
+            
+            const ctx = document.getElementById('pnlChart').getContext('2d');
+            
+            if(pnlChart) pnlChart.destroy();
+            
+            pnlChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Performance (PnL)',
+                        data: values,
+                        borderColor: '#38bdf8',
+                        backgroundColor: 'rgba(56, 189, 248, 0.1)',
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        y: { grid: { color: 'rgba(255,255,255,0.05)' }, ticks: { color: '#94a3b8' } },
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8' } }
+                    }
+                }
+            });
+        }
+
+        // -- WEBSOCKET FEED --
+        function connectWS() {
+            const ws = new WebSocket(`ws://${window.location.host}/ws`);
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                
+                // 1. Core Performance Stats
+                if(data.stats) {
+                    document.getElementById('ov-winrate').innerText = (data.stats.win_rate * 100).toFixed(1) + '%';
+                    document.getElementById('ov-trades').innerText = data.stats.trades;
+                }
+
+                // 2. Risk State & Limit Handling
+                if(data.risk) {
+                    const isEnabled = data.risk.enabled;
+                    const trades = data.risk.trades;
+                    document.getElementById('ov-trades').innerText = trades || 0;
+                    
+                    const contBtn = document.getElementById('continueTradingBtn');
+                    if (!isEnabled && trades >= (data.risk.max_trades || 50)) {
+                        contBtn.style.display = 'flex';
+                    } else {
+                        contBtn.style.display = 'none';
+                    }
+                    
+                    // Update P&L metrics from risk state
+                    if (data.risk.live_pnl !== undefined) {
+                        const lpnl = data.risk.live_pnl;
+                        const ovLivePnl = document.getElementById('ov-live-pnl');
+                        ovLivePnl.innerText = '₹' + lpnl.toLocaleString('en-IN', {minimumFractionDigits: 2});
+                        ovLivePnl.style.color = lpnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                    }
+                    if (data.risk.paper_pnl !== undefined) {
+                        const ppnl = data.risk.paper_pnl;
+                        const ovPaperPnl = document.getElementById('ov-paper-pnl');
+                        ovPaperPnl.innerText = '₹' + ppnl.toLocaleString('en-IN', {minimumFractionDigits: 2});
+                        ovPaperPnl.style.color = ppnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                    }
+                    
+                    // Update Market Status Badge
+                    const marketBadge = document.getElementById('marketStatusBadge');
+                    if (data.risk.market_open) {
+                        marketBadge.innerText = 'Market: OPEN';
+                        marketBadge.style.background = 'rgba(16, 185, 129, 0.1)';
+                        marketBadge.style.color = 'var(--success)';
+                        marketBadge.style.borderColor = 'rgba(16, 185, 129, 0.2)';
+                    } else {
+                        marketBadge.innerText = 'Market: CLOSED';
+                        marketBadge.style.background = 'rgba(239, 68, 68, 0.1)';
+                        marketBadge.style.color = 'var(--danger)';
+                        marketBadge.style.borderColor = 'rgba(239, 68, 68, 0.2)';
+                    }
+
+                    // Update main status button
+                    const statusBtn = document.getElementById('tradingStatusBtn');
+                    if (isEnabled) {
+                        statusBtn.innerHTML = "⏸ Pause Trading";
+                        statusBtn.style.background = "var(--warning)";
+                        statusBtn.style.color = "#000";
+                    } else {
+                        statusBtn.innerHTML = "▶ Start Trading";
+                        statusBtn.style.background = "var(--success)";
+                        statusBtn.style.color = "#fff";
+                    }
+                }
+
+                // Market status fallback from server-computed status
+                if(data.market) {
+                    const badge = document.getElementById('marketStatusBadge');
+                    badge.innerText = 'Market: ' + data.market.status;
+                    badge.style.color = data.market.color;
+                    badge.style.background = data.market.color + '15';
+                    badge.style.borderColor = data.market.color + '40';
+                }
+
+                // 3. Active Positions (Live Trades Broadcast)
+                if(data.positions && data.positions.positions) {
+                    const posList = data.positions.positions;
+                    document.getElementById('ov-trades').innerText = posList.length;
+                    
+                    const tbody = document.getElementById('liveTradesBody');
+                    if (posList.length === 0) {
+                        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;">No active trades. Scanning for opportunities...</td></tr>';
+                    } else {
+                        tbody.innerHTML = posList.map(p => {
+                            // Calculate live PNL roughly from features if ltp is in features (as stub) or display "Tracking..."
+                            const isBuy = p.side === 'BUY';
+                            const sideColor = isBuy ? 'var(--success)' : 'var(--danger)';
+                            const sideText = isBuy ? 'LONG (BUY)' : 'SHORT (SELL)';
+                            
+                            return `
+                            <tr>
+                                <td><strong style="color:var(--primary)">${p.symbol}</strong></td>
+                                <td style="color:${sideColor}; font-weight:bold;">${sideText}</td>
+                                <td>₹${p.entry_price.toFixed(2)}</td>
+                                <td style="color:var(--warning)">Tracking...</td>
+                                <td><span style="color:var(--success)">T: ₹${p.target.toFixed(2)}</span> / <span style="color:var(--danger)">SL: ₹${p.stop.toFixed(2)}</span></td>
+                            </tr>`;
+                        }).join('');
+                    }
+                }
+
+                // 4. Apex Scanner Results
+                if(data.scanner && data.scanner.symbols) {
+                    renderScannerTable(data.scanner);
+                }
+
+                // 5. VWAP Retest State
+                if(data.vwap_retest) {
+                    const vr = data.vwap_retest;
+                    document.getElementById('vr-candidates').innerText = vr.candidate_count || 0;
+                    document.getElementById('vr-signaled').innerText = vr.signaled_count || 0;
+                    document.getElementById('vr-scans').innerText = vr.scan_count || 0;
+                    document.getElementById('vr-lastscan').innerText = vr.last_scan ? new Date(vr.last_scan).toLocaleTimeString() : '---';
+                    const vrBody = document.getElementById('vwapRetestBody');
+                    if(vr.candidates && vr.candidates.length > 0) {
+                        vrBody.innerHTML = vr.candidates.map(c => {
+                            const statusColor = c.status === 'TRIGGERED' ? 'var(--success)' : c.status === 'SIGNALED' ? 'var(--primary)' : 'var(--warning)';
+                            return `<tr>
+                                <td><strong>${c.symbol}</strong></td>
+                                <td>₹${c.ltp.toFixed(2)}</td>
+                                <td>₹${c.mvwap.toFixed(2)}</td>
+                                <td>${c.distance_pct}%</td>
+                                <td>${c.vol_ratio}</td>
+                                <td style="color:var(--success)">${c.rally_pct}%</td>
+                                <td><span style="color:${statusColor}; font-weight:bold;">${c.status}</span></td>
+                            </tr>`;
+                        }).join('');
+                    } else {
+                        vrBody.innerHTML = '<tr><td colspan="7" style="text-align:center; color:var(--text-muted);">No candidates in retest zone currently</td></tr>';
+                    }
+                }
+
+                // 6. Regime State
+                if(data.regime) {
+                    const rb = document.getElementById('regimeBadge');
+                    const regime = data.regime.intraday || 'NEUTRAL';
+                    const colors = {TRENDING_UP:'var(--success)',TRENDING_DOWN:'var(--danger)',RANGE_BOUND:'var(--warning)',VOLATILE:'var(--secondary)',NEUTRAL:'var(--text-muted)'};
+                    rb.innerText = 'Regime: ' + regime;
+                    rb.style.color = colors[regime] || 'var(--text-muted)';
+                    rb.style.border = '1px solid ' + (colors[regime] || 'transparent');
+                }
+            };
+            ws.onclose = () => setTimeout(connectWS, 3000);
+        }
+
+        // Init
+        connectWS();
+        fetchChartData();
+        loadScannerResults();
+        loadTradeHistory();
+        setInterval(loadScannerResults, 30000);
+
+        // -- TRADE JOURNAL --
+        async function loadJournal(range) {
+            // Update active button
+            document.querySelectorAll('.jnl-btn').forEach(b => {
+                b.style.background = 'var(--surface-accent)'; b.style.color = '#fff';
+            });
+            const activeBtn = document.getElementById('jnl-' + range);
+            if(activeBtn) { activeBtn.style.background = 'var(--primary)'; activeBtn.style.color = '#000'; }
+
+            let url = `/api/trades/journal?range=${range}`;
+            if(range === 'custom') {
+                const s = document.getElementById('jnl-start').value;
+                const e = document.getElementById('jnl-end').value;
+                if(!s || !e) { alert('Select both start and end dates'); return; }
+                url += `&start=${s}&end=${e}`;
+            }
+
+            try {
+                const res = await fetch(url);
+                const data = await res.json();
+                
+                // Update summary cards
+                const sum = data.summary || {};
+                document.getElementById('jnl-total').innerText = sum.total_trades || 0;
+                const pnlEl = document.getElementById('jnl-pnl');
+                pnlEl.innerText = '₹' + (sum.total_pnl || 0).toLocaleString('en-IN', {minimumFractionDigits:2});
+                pnlEl.style.color = (sum.total_pnl || 0) >= 0 ? 'var(--success)' : 'var(--danger)';
+                document.getElementById('jnl-wr').innerText = (sum.win_rate || 0) + '%';
+                document.getElementById('jnl-wins').innerText = sum.wins || 0;
+                document.getElementById('jnl-losses').innerText = sum.losses || 0;
+                const avgEl = document.getElementById('jnl-avg');
+                avgEl.innerText = '₹' + (sum.avg_pnl || 0).toFixed(2);
+                avgEl.style.color = (sum.avg_pnl || 0) >= 0 ? 'var(--success)' : 'var(--danger)';
+                document.getElementById('jnl-best').innerText = '₹' + (sum.best_trade || 0).toFixed(2);
+                document.getElementById('jnl-worst').innerText = '₹' + (sum.worst_trade || 0).toFixed(2);
+
+                const rangeLabels = {today:'Today', yesterday:'Yesterday', week:'This Week', month:'This Month', custom:'Custom Range'};
+                document.getElementById('jnl-range-label').innerText = 'Showing: ' + (rangeLabels[range] || range) + ` (${data.trades?.length || 0} trades)`;
+
+                // Render table
+                const tbody = document.getElementById('journalBody');
+                if(!data.trades || data.trades.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center; color:var(--text-muted); padding:2rem;">No trades found for this period</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = data.trades.map((t, i) => {
+                    const isBuy = t.side === 'BUY';
+                    const sideColor = isBuy ? 'var(--success)' : 'var(--danger)';
+                    const pnlColor = t.pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                    const ts = t.timestamp ? new Date(t.timestamp).toLocaleString('en-IN', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '---';
+                    const stratColor = t.strategy === 'Index Options' ? 'var(--primary)' : 'var(--secondary)';
+                    
+                    return `<tr style="border-bottom:1px solid rgba(255,255,255,0.03);">
+                        <td style="color:var(--text-muted); font-size:0.8em;">${t.id || (i+1)}</td>
+                        <td style="font-size:0.82em; color:var(--text-muted); white-space:nowrap;">${ts}</td>
+                        <td><strong style="color:var(--text-main)">${t.symbol}</strong></td>
+                        <td style="color:${sideColor}; font-weight:bold;">${isBuy ? '▲ BUY' : '▼ SELL'}</td>
+                        <td><span style="font-size:0.8em; padding:2px 8px; border-radius:4px; background:rgba(139,92,246,0.1); color:${stratColor};">${t.strategy}</span></td>
+                        <td>₹${t.entry_price ? t.entry_price.toFixed(2) : '---'}</td>
+                        <td>₹${t.exit_price ? t.exit_price.toFixed(2) : '---'}</td>
+                        <td>${t.qty || '-'}</td>
+                        <td style="color:${pnlColor}; font-weight:bold;">${t.pnl >= 0 ? '+' : ''}₹${t.pnl ? t.pnl.toFixed(2) : '0.00'}</td>
+                        <td><span style="font-size:0.8em; padding:2px 8px; border-radius:4px; background:var(--surface-accent); color:var(--text-muted);">${t.reason}</span></td>
+                    </tr>`;
+                }).join('');
+            } catch(e) {
+                console.error('Journal load error:', e);
+                document.getElementById('journalBody').innerHTML = '<tr><td colspan="10" style="text-align:center; color:var(--danger);">Failed to load journal data</td></tr>';
+            }
+        }
+
+        // -- ANALYTICS --
+        async function loadAnalytics() {
+            try {
+                const res = await fetch('/api/analytics/insights');
+                const data = await res.json();
+
+                // Recommendations
+                const recDiv = document.getElementById('aiRecommendations');
+                if(data.recommendations && data.recommendations.length > 0) {
+                    recDiv.innerHTML = data.recommendations.map(r => 
+                        `<div style="padding:8px 12px; margin-bottom:6px; border-radius:6px; background:rgba(139,92,246,0.05); border-left:3px solid var(--secondary); font-size:0.9rem;">${r}</div>`
+                    ).join('');
+                } else {
+                    recDiv.innerHTML = '<p style="color:var(--text-muted);">No recommendations yet. Need more trade data for insights.</p>';
+                }
+
+                // Strategy Performance
+                const spBody = document.getElementById('strategyPerfBody');
+                if(data.strategy_performance && data.strategy_performance.length > 0) {
+                    spBody.innerHTML = data.strategy_performance.map(s => {
+                        const wrColor = s.win_rate >= 55 ? 'var(--success)' : s.win_rate >= 40 ? 'var(--warning)' : 'var(--danger)';
+                        const pnlColor = s.total_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                        return `<tr>
+                            <td><strong>${s.strategy}</strong></td>
+                            <td>${s.trades}</td>
+                            <td style="color:${wrColor}; font-weight:bold;">${s.win_rate}%</td>
+                            <td>₹${s.avg_pnl}</td>
+                            <td style="color:${pnlColor}; font-weight:bold;">₹${s.total_pnl.toLocaleString()}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    spBody.innerHTML = '<tr><td colspan="5" style="text-align:center; color:var(--text-muted);">No strategy data available</td></tr>';
+                }
+
+                // Symbol Performance
+                const symBody = document.getElementById('symbolPerfBody');
+                if(data.symbol_performance && data.symbol_performance.length > 0) {
+                    symBody.innerHTML = data.symbol_performance.map(s => {
+                        const pnlColor = s.total_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                        return `<tr>
+                            <td><strong style="color:var(--primary)">${s.symbol}</strong></td>
+                            <td>${s.trades}</td>
+                            <td>₹${s.avg_pnl}</td>
+                            <td style="color:${pnlColor}; font-weight:bold;">₹${s.total_pnl.toLocaleString()}</td>
+                        </tr>`;
+                    }).join('');
+                } else {
+                    symBody.innerHTML = '<tr><td colspan="4" style="text-align:center; color:var(--text-muted);">Need 2+ trades per symbol</td></tr>';
+                }
+
+                // Exit Analysis
+                const exitBody = document.getElementById('exitAnalysisBody');
+                if(data.exit_analysis && data.exit_analysis.length > 0) {
+                    exitBody.innerHTML = data.exit_analysis.map(e => {
+                        const pnlColor = e.avg_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                        return `<tr><td>${e.reason}</td><td>${e.count}</td><td style="color:${pnlColor};">₹${e.avg_pnl}</td></tr>`;
+                    }).join('');
+                }
+
+                // Hourly
+                const hourBody = document.getElementById('hourlyBody');
+                if(data.hourly_analysis && data.hourly_analysis.length > 0) {
+                    hourBody.innerHTML = data.hourly_analysis.map(h => {
+                        const pnlColor = h.avg_pnl >= 0 ? 'var(--success)' : 'var(--danger)';
+                        return `<tr><td>${h.hour}:00</td><td>${h.trades}</td><td style="color:${pnlColor}; font-weight:bold;">₹${h.avg_pnl}</td></tr>`;
+                    }).join('');
+                }
+
+            } catch(e) {
+                console.error('Analytics load error:', e);
+                document.getElementById('aiRecommendations').innerHTML = '<p style="color:var(--danger);">Failed to load analytics</p>';
+            }
+        }
+
+        // -- SYSTEM CONTROLS --
+        let isTradingActive = true;
+        async function toggleTradingStatus() {
+            const btn = document.getElementById("tradingStatusBtn");
+            const cmd = isTradingActive ? "STOP_TRADING" : "START_TRADING";
+            
+            try {
+                const res = await fetch('/api/system/trading_status', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({command: cmd})
+                });
+                const data = await res.json();
+                
+                if (data.status === 'success') {
+                    isTradingActive = !isTradingActive;
+                    if (isTradingActive) {
+                        btn.innerHTML = "⏸ Pause Trading";
+                        btn.style.background = "var(--warning)";
+                        btn.style.color = "#000";
+                    } else {
+                        btn.innerHTML = "▶ Start Trading";
+                        btn.style.background = "var(--success)";
+                        btn.style.color = "#fff";
+                    }
+                }
+            } catch(e) { console.error("Failed to toggle trading status", e); }
+        }
+
+        async function continueTrading() {
+            try {
+                const res = await fetch('/api/risk/continue_trading', { method: 'POST' });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    document.getElementById('continueTradingBtn').style.display = 'none';
+                    alert(data.message);
+                }
+            } catch(e) { console.error("Failed to continue trading", e); }
+        }
+
+        async function systemShutdown() {
+            const confirmShutdown = confirm("CRITICAL WARNING: This will systematically close ALL open positions at market price and shut down the Algo OS engines. Are you sure you want to proceed?");
+            if(!confirmShutdown) return;
+
+            try {
+                const res = await fetch('/api/system/shutdown', { method: 'POST' });
+                const data = await res.json();
+                alert(data.message || "System shutdown initiated.");
+            } catch(e) {
+                console.error("Shutdown signal failed", e);
+                alert("Failed to send shutdown command.");
+            }
+        }
+
+        // -- PAPER/LIVE TOGGLE --
+        let isLiveMode = false;
+        async function toggleTradingMode() {
+            if(isLiveMode) {
+                // Switching from Live to Paper
+                isLiveMode = false;
+                document.getElementById("btnPaper").style = "padding: 0.4rem 1rem; border-radius:6px; background:var(--primary); color:#000; font-weight:bold;";
+                document.getElementById("btnLive").style = "padding: 0.4rem 1rem; border-radius:6px; color:var(--text-muted); box-shadow: none;";
+            } else {
+                // Switching from Paper to Live
+                const confirmLive = confirm("WARNING: You are about to enable REAL TRADING. Capital will be at risk. Real orders will be placed. Do you want to proceed?");
+                if(!confirmLive) return;
+                
+                isLiveMode = true;
+                document.getElementById("btnLive").style = "padding: 0.4rem 1rem; border-radius:6px; background:var(--danger); color:#fff; font-weight:bold; box-shadow: 0 0 15px rgba(239, 68, 68, 0.6);";
+                document.getElementById("btnPaper").style = "padding: 0.4rem 1rem; border-radius:6px; color:var(--text-muted);";
+            }
+            
+            const mode = isLiveMode ? "LIVE" : "PAPER";
+            try {
+                await fetch('/api/settings/toggle_live', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({mode: mode})
+                });
+            } catch(e) { console.error("Failed to toggle mode", e); }
+        }
+
+        // -- TABLE SORTING --
+        let sortDirections = [true, true, true, true, true, true, true]; // true = desc, false = asc (default desc for time)
+        function sortTable(n) {
+            var table, rows, switching, i, x, y, shouldSwitch, dir, switchcount = 0;
+            table = document.getElementById("closedTradesTable");
+            switching = true;
+            dir = sortDirections[n] ? "desc" : "asc";
+            sortDirections[n] = !sortDirections[n]; // toggle for next click
+            
+            while (switching) {
+                switching = false;
+                rows = table.rows;
+                for (i = 1; i < (rows.length - 1); i++) {
+                    shouldSwitch = false;
+                    x = rows[i].getElementsByTagName("TD")[n];
+                    y = rows[i + 1].getElementsByTagName("TD")[n];
+                    
+                    let valX = x.innerHTML.replace(/<[^>]*>?/gm, '').replace(/[₹,]/g, '').trim();
+                    let valY = y.innerHTML.replace(/<[^>]*>?/gm, '').replace(/[₹,]/g, '').trim();
+                    
+                    // Basic numeric vs string detection
+                    if(!isNaN(valX) && !isNaN(valY)) {
+                        valX = parseFloat(valX);
+                        valY = parseFloat(valY);
+                    } else if (n === 0) { // Time column
+                        // Simple time string compare works fine for HH:MM:SS format
+                    } else {
+                        valX = valX.toLowerCase();
+                        valY = valY.toLowerCase();
+                    }
+
+                    if (dir == "asc") {
+                        if (valX > valY) {
+                            shouldSwitch = true;
+                            break;
+                        }
+                    } else if (dir == "desc") {
+                        if (valX < valY) {
+                            shouldSwitch = true;
+                            break;
+                        }
+                    }
+                }
+                if (shouldSwitch) {
+                    rows[i].parentNode.insertBefore(rows[i + 1], rows[i]);
+                    switching = true;
+                    switchcount ++;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
