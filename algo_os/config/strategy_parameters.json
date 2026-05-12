@@ -1,0 +1,7 @@
+{
+  "footprint_threshold": 65,
+  "imbalance_threshold": 0.65,
+  "vacuum_compression": 0.40,
+  "momentum_threshold": 0.60,
+  "alpha_confidence": 70
+}

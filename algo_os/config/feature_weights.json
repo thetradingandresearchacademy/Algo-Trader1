@@ -1,0 +1,8 @@
+{
+  "footprint": 0.30,
+  "vacuum": 0.20,
+  "sweep": 0.15,
+  "accumulation": 0.15,
+  "volatility": 0.15,
+  "iceberg": 0.05
+}
