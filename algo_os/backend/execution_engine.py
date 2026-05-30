@@ -7,32 +7,32 @@ import importlib.util
 
 from services.redis_stream import RedisStream
 from services.broker_api import BrokerAPI
+from services.cache_manager import CacheManager
 
 from config import settings as sys_config
 from datetime import time as dtime
 
+# Enterprise-grade typed models
+from models.signal import Signal
+from models.position import Position as TypedPosition
+from models.market_state import MarketState
+
 class ExecutionEngine:
     # Both LIVE_TRADING and CONFIRM_REAL_TRADING must be True in tara_config.py
     _is_live = getattr(sys_config, "LIVE_TRADING", False)
-    _is_confirmed = not getattr(sys_config, "PAPER_TRADING", True)
-    CONFIRM_REAL_TRADING = _is_live and _is_confirmed
+    _is_paper = getattr(sys_config, "PAPER_TRADING", False)
+    CONFIRM_REAL_TRADING = _is_live and not _is_paper
     DEFAULT_QTY = 50
-
-    # Rate‑limit helpers (max 3 orders/sec, 2 modifications/sec)
-    _order_timestamps = []
-    _modify_timestamps = []
-    _failure_count = 0  # circuit‑breaker counter
-    _force_paper_mode = False  # Auto-fallback when broker is unreachable
 
     # ==========================================
     #  SCALP & TRAILING SL CONFIGURATION (3-Stage Progressive)
     # ==========================================
     # Stage 1: Breakeven — lock entry price early
-    BREAKEVEN_TRIGGER_PCT = 0.005  # +0.5% → move SL to entry (Was 0.3% - too tight)
+    BREAKEVEN_TRIGGER_PCT = 0.012  # +1.2% → move SL to entry (whipsaw protection)
     # Stage 2: Tight trail — protect developing profits
     TRAIL_STAGE2_TRIGGER = 0.012   # +1.2% → trail at 0.6% below high (Was 0.7%)
     TRAIL_STAGE2_PCT = 0.006       # 0.6% trailing distance
-    # Stage 3: Lock profit — maximize capture near target
+    # Stage 3: Lock profit — maximize signature near target
     TRAIL_STAGE3_TRIGGER = 0.02    # +2.0% → trail at 0.4% below high (Was 1.5%)
     TRAIL_STAGE3_PCT = 0.004       # 0.4% trailing distance (tight)
     TRAILING_SL_PCT = 0.0035       # Default trail (Stage 2 fallback)
@@ -48,22 +48,24 @@ class ExecutionEngine:
 
         self.redis = RedisStream()
         self.broker = BrokerAPI()  # Singleton — real broker gateway
+        self.cache_manager = CacheManager()
 
         # Streams
         self.signal_stream = "portfolio_orders"
         self.price_stream = "micro_ticks"
         self.risk_stream = "risk_state"
         self.active_positions_stream = "active_positions"
+        self.regime_stream = "market_regime"
         self.command_stream = "control_commands"
-        self.regime_stream = "regime_state"
 
-        # Internal state
+        # Internal state (MUST be instance-level, not class-level)
         self._order_timestamps = []
         self._modify_timestamps = []
         self._current_regime = "NEUTRAL"
         self._index_direction = "NEUTRAL"
         self._vix = 15.0
         self._failure_count = 0
+        self._force_paper_mode = False  # Instance-level: resets on restart
 
         # Stream cursors
         # Using today_id ensures we catch signals missed during restarts
@@ -78,8 +80,10 @@ class ExecutionEngine:
         self.symbol_cooldowns = {} # symbol -> last_close_time
         self.active_trades_key = "active_trades"
 
-        # Scrip Master for token resolution
-        self.scrip_master = {}
+        # Asynchronous Priority Queue for SEBI-compliant execution scheduling
+        self.order_queue = asyncio.PriorityQueue()
+
+        # Load Scrip Master (manages downloads/refreshes cleanly)
         self._load_scrip_master()
 
         # Risk state
@@ -100,9 +104,10 @@ class ExecutionEngine:
                         for msg_id, payload in entries:
                             last_id = msg_id
                             data = json.loads(payload.get("data", "{}"))
-                            self._current_regime = data.get("intraday", "NEUTRAL")
-                            self._index_direction = data.get("index_direction", "NEUTRAL")
-                            self._vix = data.get("vix_proxy", 15.0)
+                            state = MarketState.from_dict(data)
+                            self._current_regime = state.intraday_regime
+                            self._index_direction = state.index_direction
+                            self._vix = state.vix_proxy
                 await asyncio.sleep(5)
             except Exception:
                 await asyncio.sleep(10)
@@ -111,21 +116,27 @@ class ExecutionEngine:
 
         mode = "🔴 LIVE TRADING" if self.CONFIRM_REAL_TRADING else "📝 PAPER TRADING"
         print(f"Execution Engine started | Mode: {mode}")
+        print(f"  Config: LIVE_TRADING={self._is_live} | PAPER_TRADING={self._is_paper} | CONFIRM={self.CONFIRM_REAL_TRADING}")
 
         # Pre-validate broker connectivity on startup
         if self.CONFIRM_REAL_TRADING:
             try:
-                auth_ok = self.broker.authenticate()
+                auth_ok = self.broker.authenticate(force=True)  # Force fresh auth on boot
                 if not auth_ok:
                     print("⚠️ BROKER AUTH FAILED ON STARTUP — Falling back to PAPER MODE")
                     self._force_paper_mode = True
                 else:
-                    print("✅ Broker authenticated successfully for LIVE trading")
+                    print(f"✅ Broker authenticated for LIVE trading | Session: {self.broker._authenticated} | API: {self.broker._smart_connect is not None}")
             except Exception as e:
                 print(f"⚠️ BROKER AUTH EXCEPTION: {e} — Falling back to PAPER MODE")
                 self._force_paper_mode = True
+        
+        # Log final resolved mode after auth check
+        resolved_mode = "🔴 LIVE" if (self.CONFIRM_REAL_TRADING and not self._force_paper_mode) else "📝 PAPER"
+        print(f"  ▸ Resolved execution mode: {resolved_mode}")
 
         asyncio.create_task(self._monitor_regime())
+        asyncio.create_task(self.order_dispatcher())
 
         # Load persisted positions from Redis
         self._load_positions()
@@ -158,13 +169,40 @@ class ExecutionEngine:
                         raw = payload.get("data")
                         if raw is None:
                             continue
-                        signal = json.loads(raw)
+                        signal_dict = json.loads(raw)
+                        signal = Signal.from_dict(signal_dict)
                         await self.process_signal(signal)
 
             except Exception as e:
 
                 print("ExecutionEngine signal error:", e)
                 await asyncio.sleep(1)
+
+    async def order_dispatcher(self):
+        """Worker task to process broker orders sequentially from the priority queue."""
+        while True:
+            try:
+                priority, order_fn, args, kwargs, future = await self.order_queue.get()
+                try:
+                    res = await order_fn(*args, **kwargs)
+                    if not future.done():
+                        future.set_result(res)
+                except Exception as e:
+                    if not future.done():
+                        future.set_exception(e)
+                finally:
+                    self.order_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print("Error in order dispatcher:", e)
+                await asyncio.sleep(0.1)
+
+    async def queue_order_execution(self, priority, fn, *args, **kwargs):
+        """Helper to queue an order execution coroutine and await its result."""
+        future = asyncio.get_event_loop().create_future()
+        await self.order_queue.put((priority, fn, args, kwargs, future))
+        return await future
 
     async def _heartbeat(self):
         """Print heartbeat every 60s for terminal visibility."""
@@ -173,7 +211,9 @@ class ExecutionEngine:
             mode = "LIVE" if (self.CONFIRM_REAL_TRADING and not self._force_paper_mode) else "PAPER"
             if self._force_paper_mode:
                 mode += " (FALLBACK)"
-            print(f"💓 [EXEC HEARTBEAT] Mode={mode} | Positions={len(self.positions)} | "
+            broker_status = "AUTH_OK" if self.broker._authenticated else "AUTH_FAIL"
+            print(f"💓 [EXEC HEARTBEAT] Mode={mode} | Broker={broker_status} | "
+                  f"Positions={len(self.positions)} | "
                   f"Trading={'ON' if self.trading_enabled else 'OFF'} | "
                   f"Failures={self._failure_count} | "
                   f"Regime={self._current_regime} | Direction={self._index_direction}")
@@ -238,11 +278,21 @@ class ExecutionEngine:
 
         if symbol in self.positions:
             return
-            
+
+        # --- SCORE DEFENSE GATE ---
+        sig_score = signal.get("score", signal.get("confidence", 0))
+        if isinstance(sig_score, float) and sig_score < 1:
+            sig_score = int(sig_score * 100)
+        if sig_score < 65:
+            return
+
+        # --- MAX POSITIONS ---
+        if len(self.positions) >= 5:
+            return
+
         # --- Check Cooldown ---
         last_close = self.symbol_cooldowns.get(symbol, 0)
         if time.time() - last_close < self.TRADE_COOLDOWN_SECONDS:
-            # print(f"⏳ COOLDOWN | Skipping signal for {symbol} (wait {int(self.TRADE_COOLDOWN_SECONDS - (time.time()-last_close))}s)")
             return
 
         await self.open_trade(symbol, side, price, signal)
@@ -259,9 +309,19 @@ class ExecutionEngine:
         * stop – below swing low if provided, otherwise 1 % below entry (BUY) or above (SELL)
         * order throttling – max 3 orders/sec (circuit‑breaker after 3 failures)
         """
-        # ---- Quantity ----
-        qty = getattr(self, "DEFAULT_QTY", 50)
-        qty = max(10, int(qty / 10) * 10)  # enforce multiples of 10
+        # ---- Block Cash Equity Shorting ----
+        if (side == "SELL" or side == "SHORT") and symbol.endswith("-EQ"):
+            print(f"🚫 EXECUTION BLOCK | Shorting cash equity is disabled: {symbol}")
+            return
+
+        # ---- Quantity (MDE risk-adjusted) ----
+        qty = signal.get("qty", self.DEFAULT_QTY)
+
+        # ---- Minimum Notional Check ----
+        notional = qty * price
+        if notional < 5000:
+            print(f"🚫 DUST TRADE BLOCKED | {symbol} qty={qty} × ₹{price:.0f} = ₹{notional:.0f} < ₹5000 min")
+            return
 
         # ---- Target & Stop‑Loss ----
         if price < 100 or price > 2000:
@@ -309,42 +369,49 @@ class ExecutionEngine:
             await asyncio.sleep(0.4)  # Non-blocking back-off
         self._order_timestamps.append(time.time())
 
-        # ---- Build trade dict ----
-        trade = {
-            "symbol": symbol,
-            "side": side,
-            "entry_price": round(price, 2),
-            "stop": round(stop, 2),
-            "initial_stop": round(stop, 2),  # preserve original SL for reference
-            "target": round(target, 2),
-            "qty": qty,
-            "entry_time": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%dT%H:%M:%S"),
-            "features": signal.get("features", {}),
+        # ---- Build trade object ----
+        trade = TypedPosition(
+            symbol=symbol,
+            side=side,
+            entry_price=round(price, 2),
+            stop=round(stop, 2),
+            initial_stop=round(stop, 2),  # preserve original SL for reference
+            target=round(target, 2),
+            qty=qty,
+            entry_time=datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%dT%H:%M:%S"),
+            features=signal.features,
             # --- Trailing SL state ---
-            "highest_price": round(price, 2),   # tracks highest since entry (BUY)
-            "lowest_price": round(price, 2),     # tracks lowest since entry (SELL)
-            "trailing_active": False,            # trailing kicks in after breakeven
-            "partial_booked": False,
-            "scalp_checked": False,
-            "mode": "LIVE" if (self.CONFIRM_REAL_TRADING and not self._force_paper_mode) else "PAPER",
-        }
+            highest_price=round(price, 2),   # tracks highest since entry (BUY)
+            lowest_price=round(price, 2),     # tracks lowest since entry (SELL)
+            trailing_active=False,            # trailing kicks in after breakeven
+            trail_stage=0,
+            partial_booked=False,
+            scalp_checked=False,
+            mode="LIVE" if (self.CONFIRM_REAL_TRADING and not self._force_paper_mode) else "PAPER",
+        )
+
+        print(f"📋 TRADE SETUP | {symbol} {side} | Mode: {trade.mode} | ForcePaper: {self._force_paper_mode} | BrokerAuth: {self.broker._authenticated}")
 
         # ---- Track position immediately to prevent race conditions ----
         self.positions[symbol] = trade
         
         # ---- Place order (paper or real) ----
         use_live = self.CONFIRM_REAL_TRADING and not self._force_paper_mode
+        # Entry priority: 100 - score
+        score = int(signal.score)
+        priority = max(1, 100 - score)
+        
         if use_live:
-            success = await self._place_real_order(trade)
+            success = await self.queue_order_execution(priority, self._place_real_order, trade)
         else:
-            trade["mode"] = "PAPER"
+            trade.mode = "PAPER"
             success = self._place_paper_order(trade)
 
         if not success:
             # retry once
             print("Retrying order placement...")
             if use_live:
-                success = await self._place_real_order(trade)
+                success = await self.queue_order_execution(priority, self._place_real_order, trade)
             else:
                 success = self._place_paper_order(trade)
 
@@ -352,7 +419,8 @@ class ExecutionEngine:
             # LIVE failed twice — fallback to PAPER instead of circuit-breaking
             print("⚠️ LIVE order failed twice — auto-falling back to PAPER for this trade")
             self._failure_count += 1
-            trade["mode"] = "PAPER"
+            trade.mode = "PAPER"
+            self._save_positions(symbol)
             success = self._place_paper_order(trade)
             if self._failure_count >= 5:
                 self._force_paper_mode = True
@@ -395,12 +463,13 @@ class ExecutionEngine:
                 target_str1 = f"{float(strike):.1f}" if strike else ""
                 target_str2 = str(int(strike)) if strike else ""
                 
-                for item in getattr(self, "scrip_master_list", []):
-                    if item.get("exch_seg") == "NFO" and item.get("name") == base_sym:
-                        s_str = str(item.get("strike", ""))
-                        if s_str == target_str1 or s_str.startswith(target_str2 + ".") or s_str == target_str2 or target_str2 in s_str:
-                            if item.get("symbol", "").upper().endswith(opt_type.upper()):
-                                candidates.append(item)
+                # Fetch NFO items grouped by base symbol (O(1) filter, very fast)
+                nfo_items = self.cache_manager.get_nfo_by_name(base_sym)
+                for item in nfo_items:
+                    s_str = str(item.get("strike", ""))
+                    if s_str == target_str1 or s_str.startswith(target_str2 + ".") or s_str == target_str2 or target_str2 in s_str:
+                        if item.get("symbol", "").upper().endswith(opt_type.upper()):
+                            candidates.append(item)
                                 
                 if candidates:
                     def parse_expiry(item):
@@ -414,36 +483,74 @@ class ExecutionEngine:
                     candidates.sort(key=parse_expiry)
                     matched = candidates[0]
                     trade["symbol"] = matched.get("symbol")
+                    self._apply_smart_lot_size(trade, matched)
                     return matched.get("token", ""), "NFO"
 
         # 2. Equity/Index resolution
-        # Try exact match first
-        if symbol in self.scrip_master:
-            return self.scrip_master[symbol].get("token", ""), self.scrip_master[symbol].get("exch_seg", "NSE")
+        # Try exact match first (O(1))
+        scrip = self.cache_manager.get_scrip_by_symbol(symbol)
+        if scrip:
+            self._apply_smart_lot_size(trade, scrip)
+            return scrip.get("token", ""), scrip.get("exch_seg", "NSE")
             
-        # Try symbol + '-EQ' for NSE Equities
+        # Try symbol + '-EQ' for NSE Equities (O(1))
         eq_sym = f"{symbol}-EQ"
-        if eq_sym in self.scrip_master:
+        scrip = self.cache_manager.get_scrip_by_symbol(eq_sym)
+        if scrip:
             trade["symbol"] = eq_sym
-            return self.scrip_master[eq_sym].get("token", ""), "NSE"
+            self._apply_smart_lot_size(trade, scrip)
+            return scrip.get("token", ""), "NSE"
             
-        # Try substring lookup
-        for item in getattr(self, "scrip_master_list", []):
-            if item.get("exch_seg") == "NSE" and item.get("symbol", "").startswith(symbol):
-                trade["symbol"] = item.get("symbol")
-                return item.get("token", ""), "NSE"
+        # Try prefix/substring lookup on NSE only
+        nse_candidates = self.cache_manager.get_nse_scrips_starting_with(symbol)
+        if nse_candidates:
+            matched = nse_candidates[0]
+            trade["symbol"] = matched.get("symbol")
+            self._apply_smart_lot_size(trade, matched)
+            return matched.get("token", ""), "NSE"
                 
         return "", "NSE"
+
+    def _apply_smart_lot_size(self, trade, item):
+        """Validates and adjusts trade quantity based on broker's exact lot size."""
+        try:
+            if not item: return
+            lotsize_str = item.get("lotsize", "1")
+            lotsize = int(lotsize_str) if str(lotsize_str).isdigit() else 1
+            target_qty = int(trade.get("qty", self.DEFAULT_QTY))
+            
+            if lotsize > 1:
+                lots = max(1, round(target_qty / lotsize))
+                new_qty = lots * lotsize
+            else:
+                new_qty = max(1, target_qty)
+                
+            if new_qty != target_qty:
+                print(f"🔄 SMART LOT SYNC: {trade['symbol']} | App Qty: {target_qty} → Broker Lot: {lotsize} | Adjusted Qty: {new_qty}")
+                trade["qty"] = new_qty
+        except Exception as e:
+            print(f"⚠️ Error in smart lot size logic for {trade.get('symbol', 'unknown')}: {e}")
 
     async def _place_real_order(self, trade):
         """Place a REAL order via Angel One SmartConnect API."""
         try:
+            # CRITICAL: Re-verify authentication every time if failure count is rising
+            if self._failure_count > 0:
+                self.broker.authenticate(force=True)
+
             # Resolve symbol token dynamically to ensure 100% acceptance
             if not trade.get("symboltoken"):
                 token, exch = self._resolve_symbol_token(trade)
+                
+                # GAP FIX: Explicit Token Validation
+                if not token or token == "":
+                    print(f"❌ EXECUTION BLOCK | Token missing for {trade['symbol']}. Update scrip_master.")
+                    return False
+                    
                 trade["symboltoken"] = token
                 trade["exchange"] = exch
 
+            # AUTO-RETRY LOGIC with rate limit compliance
             result = await self.broker.place_order(
                 symbol=trade["symbol"],
                 token=trade.get("symboltoken", ""),
@@ -454,15 +561,19 @@ class ExecutionEngine:
                 product_type="INTRADAY",
                 price=trade["entry_price"]
             )
+            
             if result.get("success"):
                 trade["order_id"] = result.get("order_id", "")
+                self._failure_count = 0
                 print(f"⚡ LIVE ORDER CONFIRMED | {trade['side']} {trade['qty']} {trade['symbol']} | OrderID: {trade['order_id']}")
                 return True
             else:
-                print(f"❌ LIVE ORDER FAILED | {trade['symbol']} | {result.get('error')}")
+                print(f"⚠️ BROKER REJECTED | {trade['symbol']} | {result.get('error')}")
                 return False
+                
         except Exception as e:
-            print(f"❌ LIVE ORDER EXCEPTION | {trade['symbol']} | {e}")
+            self._failure_count += 1
+            print(f"❌ LIVE EXECUTION EXCEPTION | {trade['symbol']} | {e}")
             return False
 
     async def _reset_circuit_breaker(self):
@@ -494,33 +605,79 @@ class ExecutionEngine:
     # ---------------------------------------------------------
 
     def _load_scrip_master(self):
-        """Load symbol-to-token mapping from scrip_master.json."""
+        """Load symbol-to-token mapping from scrip_master.json.
+        Auto-refreshes weekly (Monday) or if file is >7 days old."""
         try:
             import os
-            # Resolve to d:\Algo Trader1\data\scrip_master.json
             path = Path(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))) / "data" / "scrip_master.json"
-            if not path.exists():
-                print(f"⚠️ scrip_master.json not found at {path}")
-                return
-            
-            with open(path, 'r') as f:
-                data = json.load(f)
-                self.scrip_master_list = data
-                # Optimize for lookup: {symbol: {token, exch_seg}}
-                self.scrip_master = {item['symbol']: item for item in data}
-            print(f"✅ Loaded {len(self.scrip_master)} scrips for token resolution.")
+
+            # Weekly refresh check (Monday or stale >7 days)
+            needs_refresh = not path.exists()
+            if not needs_refresh:
+                file_age_days = (time.time() - os.path.getmtime(path)) / 86400
+                is_monday = datetime.now().weekday() == 0
+                if file_age_days > 7 or (is_monday and file_age_days > 1):
+                    needs_refresh = True
+
+            if needs_refresh:
+                self._download_scrip_master(path)
+
+            # Let CacheManager initialize the filtered JSON into memory
+            self.cache_manager.get_scrip_master(force_reload=needs_refresh)
+            print("✅ Scrip master initialized via CacheManager singleton.")
         except Exception as e:
             print(f"Error loading scrip master: {e}")
+
+    def _download_scrip_master(self, path):
+        """Download fresh scrip master from Angel One, filter for NSE/NFO to optimize memory, and delete temp download."""
+        temp_path = path.with_suffix('.temp')
+        try:
+            import urllib.request
+            import json
+            import os
+            url = "https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json"
+            print("🔄 WEEKLY SCRIP MASTER REFRESH | Downloading from Angel One...")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            urllib.request.urlretrieve(url, str(temp_path))
+            print("📊 Processing download: filtering NSE/NFO segments to save memory...")
+            
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                raw_data = json.load(f)
+                
+            allowed_segments = {"NSE", "NFO"}
+            allowed_keys = {"token", "symbol", "name", "expiry", "strike", "lotsize", "instrumenttype", "exch_seg"}
+            
+            filtered_data = []
+            for item in raw_data:
+                if item.get("exch_seg") in allowed_segments:
+                    cleaned_item = {k: item[k] for k in allowed_keys if k in item}
+                    filtered_data.append(cleaned_item)
+                    
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(filtered_data, f)
+                
+            print(f"✅ Filtered scrip master saved | {len(filtered_data)} scrips (temp file cleaned)")
+        except Exception as e:
+            print(f"⚠️ Scrip master download failed: {e} — using existing file")
+        finally:
+            if temp_path.exists():
+                try:
+                    os.remove(temp_path)
+                except Exception as ex:
+                    print(f"Error removing temp file: {ex}")
 
     def _save_positions(self, symbol=None):
         """Sync internal positions to Redis hash. If symbol provided, sync only that one."""
         try:
             if symbol:
                 if symbol in self.positions:
-                    self.redis.set_hash(self.active_trades_key, symbol, self.positions[symbol])
+                    trade = self.positions[symbol]
+                    trade_data = trade.to_dict() if hasattr(trade, "to_dict") else trade
+                    self.redis.set_hash(self.active_trades_key, symbol, trade_data)
             else:
                 for sym, trade in self.positions.items():
-                    self.redis.set_hash(self.active_trades_key, sym, trade)
+                    trade_data = trade.to_dict() if hasattr(trade, "to_dict") else trade
+                    self.redis.set_hash(self.active_trades_key, sym, trade_data)
         except Exception as e:
             print(f"Error saving positions to Redis: {e}")
 
@@ -538,7 +695,7 @@ class ExecutionEngine:
                     # Check if trade is from today (entry_time is now IST)
                     entry_time = trade.get("timestamp") or trade.get("entry_time", "")
                     if today_str in entry_time:
-                        valid_positions[sym] = trade
+                        valid_positions[sym] = TypedPosition.from_dict(trade)
                     else:
                         stale_count += 1
                         # Remove stale trade from Redis hash
@@ -546,11 +703,11 @@ class ExecutionEngine:
                 
                 self.positions = valid_positions
                 if stale_count > 0:
-                    print(f"🧹 Purged {stale_count} stale positions from previous days.")
+                     print(f"🧹 Purged {stale_count} stale positions from previous days.")
                 if self.positions:
-                    print(f"✅ Restored {len(self.positions)} active positions: {list(self.positions.keys())}")
+                     print(f"✅ Restored {len(self.positions)} active positions: {list(self.positions.keys())}")
         except Exception as e:
-            print(f"Error restoring positions: {e}")
+             print(f"Error restoring positions: {e}")
 
 
     # ---------------------------------------------------------
@@ -621,6 +778,16 @@ class ExecutionEngine:
 
         highest = trade["highest_price"]
         gain_pct = (highest - entry) / entry if entry > 0 else 0
+
+        # Smart Trailing SL once price is above entry price (protects gains early)
+        if price > entry:
+            initial_risk = entry - trade["initial_stop"]
+            if initial_risk > 0:
+                new_stop = round(highest - initial_risk, 2)
+                if new_stop > trade["stop"]:
+                    trade["stop"] = new_stop
+                    self._save_positions(symbol)
+                    print(f"🛡️ SMART TRAIL (BUY) | {symbol} | SL → {trade['stop']:.2f}")
 
         is_index = symbol in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
 
@@ -725,6 +892,16 @@ class ExecutionEngine:
         lowest = trade["lowest_price"]
         gain_pct = (entry - lowest) / entry if entry > 0 else 0
 
+        # Smart Trailing SL once price is below entry price (protects gains early for short)
+        if price < entry:
+            initial_risk = trade["initial_stop"] - entry
+            if initial_risk > 0:
+                new_stop = round(lowest + initial_risk, 2)
+                if new_stop < trade["stop"]:
+                    trade["stop"] = new_stop
+                    self._save_positions(symbol)
+                    print(f"🛡️ SMART TRAIL (SELL) | {symbol} | SL → {trade['stop']:.2f}")
+
         is_index = symbol in ("NIFTY", "BANKNIFTY", "SENSEX", "FINNIFTY", "MIDCPNIFTY")
 
         if is_index:
@@ -816,52 +993,51 @@ class ExecutionEngine:
     # ---------------------------------------------------------
 
     async def scalp_monitor(self):
-        """Periodically check if any position qualifies for a quick scalp exit.
-        
-        Scalp logic:
-        - If price reaches SCALP_TARGET_PCT (1%) profit within SCALP_TIME_LIMIT (5 min),
-          close the trade immediately for quick profit.
-        - This allows the system to free up position slots and re-enter on the next signal.
-        """
+        """Autonomous Scalp Monitor: Exit on 1% or Time Decay."""
         while True:
             try:
-                now = datetime.utcnow()
+                # Use IST consistently — entry_time is stored in IST format
+                ist = timezone(timedelta(hours=5, minutes=30))
+                now = datetime.now(ist).replace(tzinfo=None)
                 for symbol in list(self.positions.keys()):
                     trade = self.positions.get(symbol)
                     if not trade or trade.get("scalp_checked"):
                         continue
 
-                    # Check if within scalp time window
                     try:
-                        entry_time = datetime.fromisoformat(trade["entry_time"])
+                        entry_time = datetime.fromisoformat(trade["entry_time"]).replace(tzinfo=None)
                     except:
                         continue
 
-                    elapsed = (now - entry_time).total_seconds()
-                    if elapsed > self.SCALP_TIME_LIMIT:
-                        trade["scalp_checked"] = True  # No longer eligible for scalp
-                        continue
-
+                    elapsed_seconds = (now - entry_time).total_seconds()
                     entry = trade["entry_price"]
 
+                    # Calculate current gain safely
                     if trade["side"] == "BUY":
-                        scalp_target = entry * (1 + self.SCALP_TARGET_PCT)
-                        current_high = trade.get("highest_price", entry)
-                        if current_high >= scalp_target:
-                            pnl = (scalp_target - entry) * trade["qty"]
-                            print(f"⚡ SCALP EXIT | {symbol} | +{self.SCALP_TARGET_PCT*100:.1f}% in {elapsed:.0f}s")
-                            await self.close_trade(symbol, trade, scalp_target, pnl)
+                        current_best = trade.get("highest_price", entry)
+                        gain_pct = (current_best - entry) / entry if entry > 0 else 0
                     else:
-                        scalp_target = entry * (1 - self.SCALP_TARGET_PCT)
-                        current_low = trade.get("lowest_price", entry)
-                        if current_low <= scalp_target:
-                            pnl = (entry - scalp_target) * trade["qty"]
-                            print(f"⚡ SCALP EXIT | {symbol} | +{self.SCALP_TARGET_PCT*100:.1f}% in {elapsed:.0f}s")
-                            await self.close_trade(symbol, trade, scalp_target, pnl)
+                        current_best = trade.get("lowest_price", entry)
+                        gain_pct = (entry - current_best) / entry if entry > 0 else 0
+
+                    # 1. TIME-DECAY EXIT: Scalping signals die after 7 minutes (420s)
+                    if elapsed_seconds > 420:
+                        print(f"⏱️ TIME DECAY EXIT | {symbol} | Closing stale scalp.")
+                        trade["scalp_checked"] = True
+                        pnl = (current_best - entry) * trade["qty"] if trade["side"] == "BUY" else (entry - current_best) * trade["qty"]
+                        await self.close_trade(symbol, trade, current_best, pnl)
+                        continue
+
+                    # 2. PROFIT PROTECTION: The "Instant Win" 1% Scalp
+                    if gain_pct >= self.SCALP_TARGET_PCT: # 1% Scalp Target
+                        trade["scalp_checked"] = True
+                        pnl = gain_pct * entry * trade["qty"]
+                        print(f"⚡ SCALP EXIT | {symbol} | +{gain_pct*100:.1f}% in {elapsed_seconds:.0f}s")
+                        await self.close_trade(symbol, trade, current_best, pnl)
 
             except Exception as e:
                 print(f"Scalp monitor error: {e}")
-            await asyncio.sleep(2)
+            await asyncio.sleep(1) # High-frequency check
 
     # ---------------------------------------------------------
     # TRADE EXIT
@@ -873,19 +1049,38 @@ class ExecutionEngine:
             return
 
         # Place EXIT order via broker if LIVE
-        if trade.get("mode") == "LIVE" and self.CONFIRM_REAL_TRADING:
+        if trade.get("mode") == "LIVE" and self.CONFIRM_REAL_TRADING and not self._force_paper_mode:
             try:
-                exit_result = await self.broker.exit_position(
-                    symbol=symbol,
-                    token=trade.get("symboltoken", ""),
-                    qty=trade["qty"],
-                    side=trade["side"],
-                    exchange=trade.get("exchange", "NSE")
-                )
-                if exit_result.get("success"):
-                    print(f"⚡ LIVE EXIT ORDER | {symbol} | OrderID: {exit_result.get('order_id')}")
+                # Resolve token if missing (can happen for restored positions)
+                exit_token = trade.get("symboltoken", "")
+                exit_exchange = trade.get("exchange", "NSE")
+                exit_symbol = trade.get("symbol", symbol)
+                if not exit_token:
+                    exit_token, exit_exchange = self._resolve_symbol_token(trade)
+                    exit_symbol = trade.get("symbol", symbol)
+                
+                if not exit_token:
+                    print(f"⚠️ LIVE EXIT SKIP | {symbol} | No token resolved — closing on paper")
                 else:
-                    print(f"⚠️ LIVE EXIT FAILED | {symbol} | {exit_result.get('error')} — closing on paper")
+                    # Ensure broker is authenticated before exit
+                    if not self.broker._authenticated:
+                        self.broker.authenticate(force=True)
+                    
+                    # Queue exit with absolute priority = 0
+                    exit_result = await self.queue_order_execution(
+                        0,
+                        self.broker.exit_position,
+                        symbol=exit_symbol,
+                        token=exit_token,
+                        qty=trade["qty"],
+                        side=trade["side"],
+                        exchange=exit_exchange,
+                        price=exit_price
+                    )
+                    if exit_result.get("success"):
+                        print(f"⚡ LIVE EXIT ORDER | {symbol} | OrderID: {exit_result.get('order_id')}")
+                    else:
+                        print(f"⚠️ LIVE EXIT FAILED | {symbol} | {exit_result.get('error')} — closing on paper")
             except Exception as e:
                 print(f"⚠️ LIVE EXIT EXCEPTION | {symbol} | {e}")
 
@@ -900,7 +1095,7 @@ class ExecutionEngine:
             "exit_time": datetime.now(timezone(timedelta(hours=5, minutes=30))).strftime("%Y-%m-%dT%H:%M:%S"),
             "mode": trade.get("mode", "PAPER"),
             "strategy": trade.get("strategy", "INDEX"),
-            "features": trade["features"],
+            "features": trade["features"].to_dict() if hasattr(trade["features"], "to_dict") else trade["features"],
         }
 
         self.positions.pop(symbol, None)
@@ -924,7 +1119,7 @@ class ExecutionEngine:
         """Send current open positions to the UI."""
         try:
             payload = {
-                "positions": list(self.positions.values()),
+                "positions": [pos.to_dict() if hasattr(pos, "to_dict") else pos for pos in self.positions.values()],
                 "timestamp": time.time()
             }
             await self.redis.publish(self.active_positions_stream, payload)
@@ -1028,6 +1223,14 @@ class ExecutionEngine:
                     await self.close_trade(symbol, trade, exit_price, pnl)
         
         print("✅ System successfully squared off. All engines entering IDLE state.")
+        
+        # Clean up temporary files on shutdown
+        try:
+            from services.cleanup import cleanup_temp_files
+            cleanup_temp_files()
+        except Exception as e:
+            print(f"⚠️ Error during systematic shutdown cleanup: {e}")
+            
         await asyncio.sleep(3)
         # Instead of os._exit(0), we keep the process alive so the dashboard remains visible.
         # The engines are already blocked from new signals by self.trading_enabled = False.
@@ -1084,16 +1287,24 @@ class ExecutionEngine:
                 if stock_positions and self.broker._authenticated:
                     for sym, trade in stock_positions:
                         try:
-                            token = trade.get("symboltoken") or self.scrip_master.get(sym, {}).get("token", "")
-                            exchange = trade.get("exchange") or self.scrip_master.get(sym, {}).get("exch_seg", "NSE")
+                            scrip = self.cache_manager.get_scrip_by_symbol(sym) or {}
+                            token = trade.get("symboltoken") or scrip.get("token", "")
+                            exchange = trade.get("exchange") or scrip.get("exch_seg", "NSE")
                             if not token:
                                 continue
+                                
+                            # Strict WAF rate limit protection (max 2 req/sec)
+                            await asyncio.sleep(0.5)
+                            
                             ltp_resp = self.broker.api.ltpData(exchange, sym, token)
                             if ltp_resp and ltp_resp.get("data"):
                                 ltp = ltp_resp["data"].get("ltp")
                                 if ltp and ltp > 0:
                                     await self.update_positions({"symbol": sym, "ltp": float(ltp)})
-                        except Exception:
+                        except Exception as e:
+                            # Hide excessive server JSON parse WAF errors to clean up terminal
+                            if "JSON response" not in str(e):
+                                print(f"LTP fetch error for {sym}: {e}")
                             pass
             except Exception as e:
                 print(f"LTP poll error: {e}")

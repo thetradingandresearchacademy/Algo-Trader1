@@ -4,6 +4,9 @@ from datetime import datetime, date, timedelta, timezone
 
 from services.redis_stream import RedisStream
 
+# Enterprise-grade typed models
+from models.trade import Trade
+
 
 class RiskEngine:
 
@@ -37,6 +40,10 @@ class RiskEngine:
         self.live_trades = 0
         self.paper_trades = 0
 
+        # Capital Tracking
+        self.base_capital = 100000.0
+        self.current_capital = 100000.0
+
         # Publish initial state so ExecutionEngine doesn't wait forever
         self._initial_state_published = False
 
@@ -47,6 +54,41 @@ class RiskEngine:
     async def start(self):
 
         print("Risk Engine started")
+
+        # Capital Prompt
+        try:
+            import sys
+            stored_cap = self.redis.get_hashall("system_config").get("current_capital")
+            is_interactive = sys.stdin and sys.stdin.isatty()
+            
+            if stored_cap:
+                print(f"\n💰 Previous Day's Capital detected: ₹{float(stored_cap):.2f}")
+                if is_interactive:
+                    ans = input("Do you want to continue with this as base capital? (y/n) [default: y]: ")
+                    if ans.lower() == 'n':
+                        new_cap = input("Enter new base capital [default: 100000]: ")
+                        self.base_capital = float(new_cap) if new_cap else 100000.0
+                    else:
+                        self.base_capital = float(stored_cap)
+                else:
+                    print("🤖 Headless session: Continuing with previous day's capital.")
+                    self.base_capital = float(stored_cap)
+            else:
+                if is_interactive:
+                    new_cap = input("\n💰 Enter base capital [default: 100000]: ")
+                    self.base_capital = float(new_cap) if new_cap else 100000.0
+                else:
+                    print("🤖 Headless session: Defaulting to base capital ₹100,000.")
+                    self.base_capital = 100000.0
+                
+            self.current_capital = self.base_capital
+            self.redis.set_hash("system_config", "base_capital", self.base_capital)
+            self.redis.set_hash("system_config", "current_capital", self.current_capital)
+            print(f"✅ Base Capital locked at: ₹{self.base_capital:.2f}\n")
+        except Exception as e:
+            print(f"⚠️ Capital setup error: {e}. Defaulting to 100000.")
+            self.base_capital = 100000.0
+            self.current_capital = 100000.0
 
         # Publish initial enabled state immediately so other engines don't block
         if not self._initial_state_published:
@@ -80,11 +122,10 @@ class RiskEngine:
                         self.last_id = msg_id
 
                         raw = payload.get("data")
-
                         if raw is None:
                             continue
-
-                        trade = json.loads(raw)
+                        trade_dict = json.loads(raw)
+                        trade = Trade.from_dict(trade_dict)
 
                         from datetime import datetime
                         entry_time = trade.get("entry_time", "")
@@ -105,7 +146,7 @@ class RiskEngine:
 
     async def listen_for_commands(self):
         """Listen for control commands like CONTINUE_TRADING."""
-        cmd_last_id = "$"
+        cmd_last_id = self.redis.get_latest_id("control_commands")
         while True:
             try:
                 streams = self.redis.read("control_commands", cmd_last_id)
@@ -136,6 +177,17 @@ class RiskEngine:
                             self.disable_reason = "MANUALLY PAUSED"
                             print("⏸️ RISK: Trading paused manually.")
                             self.publish_state()
+                            
+                        elif data.get("command") == "SET_LIVE_TRADING":
+                            mode = data.get("mode", "PAPER")
+                            print(f"🔄 RISK: Notified of trading mode change to {mode}")
+                            self.publish_state()
+
+                        elif data.get("command") == "SET_FORCE_PAPER":
+                            enabled = data.get("enabled", False)
+                            state = "ON" if enabled else "OFF"
+                            print(f"🔄 RISK: Notified of Force Paper state change to {state}")
+                            self.publish_state()
 
             except Exception as e:
                 print(f"RiskEngine command error: {e}")
@@ -158,8 +210,12 @@ class RiskEngine:
             self.live_trades = 0
             self.paper_trades = 0
 
+            # Base capital resets to current capital on new day boundary
+            self.base_capital = self.current_capital
+            self.redis.set_hash("system_config", "base_capital", self.base_capital)
+
             self.trading_enabled = True
-            print("RISK RESET | new trading day")
+            print(f"RISK RESET | new trading day. Base Capital: ₹{self.base_capital:.2f}")
 
     def check_market_hours(self):
         """Disables trading outside 9:15 AM - 3:30 PM IST."""
@@ -194,8 +250,34 @@ class RiskEngine:
     # RISK UPDATE
     # ---------------------------------------------------------
 
+    def _calculate_charges(self, trade):
+        """Calculate approximate broker charges for realistic Net PnL."""
+        try:
+            qty = trade.get("qty", 0)
+            entry = trade.get("entry_price", 0)
+            exit_p = trade.get("exit_price", 0)
+            if not qty or not entry or not exit_p: return 0.0
+            
+            # Simple assumption: NFO (Options) vs NSE (Equity)
+            symbol = trade.get("symbol", "")
+            is_options = trade.get("is_options") or "_CE" in symbol or "_PE" in symbol
+                
+            turnover = qty * (entry + exit_p)
+            brokerage = 40.0
+            stt = (qty * exit_p) * (0.000625 if is_options else 0.00025)
+            trans_charges = turnover * (0.00053 if is_options else 0.0000345)
+            gst = (brokerage + trans_charges) * 0.18
+            sebi_stamp = turnover * 0.00005
+            
+            return round(brokerage + stt + trans_charges + gst + sebi_stamp, 2)
+        except Exception:
+            return 0.0
+
     def update_risk(self, trade):
         pnl = trade.get("pnl", 0)
+        charges = self._calculate_charges(trade)
+        net_pnl = pnl - charges
+        
         self.trades_today += 1
         self.daily_pnl += pnl
         
@@ -203,11 +285,16 @@ class RiskEngine:
         if trade.get("mode") == "LIVE":
             self.live_trades += 1
             self.live_pnl += pnl
+            self.current_capital += net_pnl
+            self.redis.set_hash("system_config", "current_capital", self.current_capital)
         else:
             self.paper_trades += 1
             self.paper_pnl += pnl
+            # Also update Active Capital for paper trades so it correctly tracks simulation/fallback performance
+            self.current_capital += net_pnl
+            self.redis.set_hash("system_config", "current_capital", self.current_capital)
 
-        status_msg = f"RISK UPDATE | Paper: ₹{self.paper_pnl:.2f} ({self.paper_trades}) | Live: ₹{self.live_pnl:.2f} ({self.live_trades})"
+        status_msg = f"RISK UPDATE | Paper: ₹{self.paper_pnl:.2f} ({self.paper_trades}) | Live: ₹{self.live_pnl:.2f} (Net: ₹{self.live_pnl - (charges * self.live_trades):.2f}) ({self.live_trades}) | Capital: ₹{self.current_capital:.2f}"
         print(status_msg)
 
         # Check daily loss (Hard Breaker - applies to total or live?)
@@ -243,6 +330,8 @@ class RiskEngine:
             "paper_pnl": self.paper_pnl,
             "live_trades": self.live_trades,
             "paper_trades": self.paper_trades,
+            "current_capital": getattr(self, "current_capital", 100000.0),
+            "base_capital": getattr(self, "base_capital", 100000.0),
             "max_loss": self.max_daily_loss,
             "reason": getattr(self, "disable_reason", ""),
             "timestamp": datetime.utcnow().isoformat()
@@ -261,6 +350,8 @@ class RiskEngine:
             "paper_pnl": self.paper_pnl,
             "live_trades": self.live_trades,
             "paper_trades": self.paper_trades,
+            "current_capital": getattr(self, "current_capital", 100000.0),
+            "base_capital": getattr(self, "base_capital", 100000.0),
             "max_loss": self.max_daily_loss,
             "reason": getattr(self, "disable_reason", ""),
             "timestamp": datetime.utcnow().isoformat()

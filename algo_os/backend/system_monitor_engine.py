@@ -46,6 +46,10 @@ class SystemMonitorEngine:
         self.paper_wins = 0
         self.live_losses = 0
         self.paper_losses = 0
+        
+        # Capital tracking
+        self.current_capital = 100000.0
+        self.base_capital = 100000.0
 
         self.last_tick_time = time.time()
 
@@ -95,7 +99,22 @@ class SystemMonitorEngine:
                 for msg_id, payload in entries:
 
                     self.last_signal_id = msg_id
-                    self.signal_count += 1
+                    
+                    try:
+                        raw = payload.get("data")
+                        if not raw: continue
+                        
+                        sig = json.loads(raw)
+                        
+                        # Only count actionable, high-probability signals for the UI to prevent pulse inflation
+                        score = float(sig.get("score", 0))
+                        confidence = float(sig.get("confidence", 0))
+                        is_actionable = sig.get("signal") in ["BUY", "SELL"]
+                        
+                        if is_actionable and (score > 60 or confidence > 60):
+                            self.signal_count += 1
+                    except Exception:
+                        pass
 
             await asyncio.sleep(0.05)
 
@@ -114,10 +133,11 @@ class SystemMonitorEngine:
                     trade = json.loads(payload.get("data", "{}"))
                     
                     from datetime import datetime, timedelta, timezone
-                    # entry_time is stored in UTC, so compare with UTC date
-                    today_utc = datetime.utcnow().strftime("%Y-%m-%d")
+                    # entry_time is stored in IST, so compare with IST date
+                    ist = timezone(timedelta(hours=5, minutes=30))
+                    today_ist = datetime.now(ist).strftime("%Y-%m-%d")
                     entry_time = trade.get("entry_time", "")
-                    if not entry_time.startswith(today_utc):
+                    if not entry_time.startswith(today_ist):
                         continue
                     
                     pnl = trade.get("pnl", 0)
@@ -155,11 +175,12 @@ class SystemMonitorEngine:
                     self.trading_enabled = state.get("enabled", True)
                     self.market_open = state.get("market_open", True)
                     
-                    # Update local metrics from RiskEngine (dual PnL support)
                     self.live_pnl = state.get("live_pnl", self.live_pnl)
                     self.paper_pnl = state.get("paper_pnl", self.paper_pnl)
                     self.live_trades = state.get("live_trades", self.live_trades)
                     self.paper_trades = state.get("paper_trades", self.paper_trades)
+                    self.current_capital = state.get("current_capital", self.current_capital)
+                    self.base_capital = state.get("base_capital", self.base_capital)
 
             await asyncio.sleep(0.1)
 
@@ -229,8 +250,11 @@ class SystemMonitorEngine:
         print("Wins/Losses      :", Fore.GREEN + str(self.paper_wins), "/", Fore.RED + str(self.paper_losses))
         print("Realized PnL     :", paper_pnl_color + "₹" + str(round(self.paper_pnl, 2)))
 
-        print(Fore.RED + "\nSystem Safety")
-        print(Fore.RED + "-------------")
+        print(Fore.RED + "\nSystem Safety & Capital")
+        print(Fore.RED + "-----------------------")
         print("Trading Enabled  :", risk_color + str(self.trading_enabled))
+        
+        cap_color = Fore.GREEN if self.current_capital >= self.base_capital else Fore.RED
+        print("Active Capital   :", cap_color + "₹" + str(round(self.current_capital, 2)))
 
         print(Fore.CYAN + "\n====================================================")

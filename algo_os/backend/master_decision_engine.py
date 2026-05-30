@@ -5,6 +5,10 @@ from datetime import datetime
 
 from services.redis_stream import RedisStream
 
+# Enterprise-grade typed models
+from models.signal import Signal
+from models.market_state import MarketState
+
 
 class MasterDecisionEngine:
 
@@ -19,7 +23,11 @@ class MasterDecisionEngine:
         self.risk_stream = "risk_state"
         self.regime_stream = "regime_state"
 
-        self.last_ids = defaultdict(lambda: self.redis.get_today_id())
+        # CRITICAL FIX: Use get_latest_id for alpha_signals to prevent
+        # replaying entire day's signals on reboot (was causing burst-then-silence)
+        self.last_ids = defaultdict(lambda: self.redis.get_latest_id(self.alpha_stream))
+        # Pre-set alpha_signals cursor to latest to skip historical backlog
+        self.last_ids[self.alpha_stream] = self.redis.get_latest_id(self.alpha_stream)
 
         self.watchlist = set()
         self.market_bias = "NEUTRAL"
@@ -43,10 +51,14 @@ class MasterDecisionEngine:
 
         # Cooldown: track recently closed symbols to allow re-entry after cooldown
         self.closed_cooldown = {}  # symbol → datetime of closure
-        self.COOLDOWN_SECONDS = 120  # 2 min cooldown before re-entry into same symbol
+        self.COOLDOWN_SECONDS = 1800  # 30 min cooldown to prevent whipsawing
 
         # Position limits
-        self.MAX_POSITIONS = 10  # Raised from 5 — allows both index + stock positions
+        self.MAX_POSITIONS = 5  # Reduced to 5 high-conviction trades
+        
+        # Daily Limits to prevent churn
+        self.daily_trades_count = defaultdict(int)
+        self.MAX_TRADES_PER_SYMBOL = 2 
 
     async def start(self):
 
@@ -57,6 +69,7 @@ class MasterDecisionEngine:
         asyncio.create_task(self.monitor_regime())
         asyncio.create_task(self.cleanup_positions())
         asyncio.create_task(self._heartbeat())
+        asyncio.create_task(self._midnight_reset_loop())
 
         while True:
 
@@ -72,8 +85,8 @@ class MasterDecisionEngine:
 
                     self.last_ids[self.alpha_stream] = msg_id
 
-                    signal = json.loads(payload.get("data"))
-
+                    signal_dict = json.loads(payload.get("data"))
+                    signal = Signal.from_dict(signal_dict)
                     decision = self.evaluate(signal)
 
                     if decision:
@@ -163,20 +176,7 @@ class MasterDecisionEngine:
                                     self.closed_cooldown[symbol] = datetime.utcnow()
                                     print(f"MDE: Position closed — {symbol} ({len(self.active_positions)} active)")
 
-                # Expire stale positions (older than 10 min — reduced from 30 min for scalping)
                 now = datetime.utcnow()
-                expired = []
-                for sym, pos in list(self.active_positions.items()):
-                    ts = pos.get("timestamp", "")
-                    try:
-                        pos_time = datetime.fromisoformat(ts)
-                        if (now - pos_time).total_seconds() > 600:  # 10 min (was 30 min)
-                            expired.append(sym)
-                    except:
-                        expired.append(sym)  # invalid timestamp = stale
-                for sym in expired:
-                    del self.active_positions[sym]
-                    print(f"MDE: Expired stale position — {sym} ({len(self.active_positions)} active)")
 
                 # Clean up old cooldowns (older than cooldown period)
                 expired_cooldowns = [
@@ -197,6 +197,23 @@ class MasterDecisionEngine:
             print(f"💓 [MDE HEARTBEAT] Regime={self.intraday_regime} | Direction={self.index_direction} | "
                   f"VIX={self.vix_proxy} | Active={len(self.active_positions)}/{self.MAX_POSITIONS} | "
                   f"Watchlist={len(self.watchlist)} | Drawdown={self.in_drawdown}")
+
+    async def _midnight_reset_loop(self):
+        """Reset daily trade counts at midnight."""
+        while True:
+            try:
+                from datetime import datetime, timedelta
+                now = datetime.now()
+                tomorrow = now.date() + timedelta(days=1)
+                midnight = datetime.combine(tomorrow, datetime.min.time())
+                sleep_seconds = (midnight - now).total_seconds()
+                await asyncio.sleep(min(sleep_seconds, 3600))
+                if datetime.now().date() == tomorrow:
+                    print("⏰ MIDNIGHT RESET | Clearing daily_trades_count")
+                    self.daily_trades_count.clear()
+            except Exception as e:
+                print(f"Error in midnight reset loop: {e}")
+                await asyncio.sleep(60)
 
     # ---------------------------------------------------------
     # CORE DECISION
@@ -221,135 +238,108 @@ class MasterDecisionEngine:
         is_breakout = signal.get("strategy") == "EXPLOSIVE_BREAKOUT"
 
         # --------- FILTER ---------
-        # Bypass watchlist for scanner, VWAP retest, and breakout signals
         if not is_index and not is_scanner_signal and not is_vwap_retest and not is_breakout:
             if symbol not in self.watchlist:
                 return None
+                
+        # 1. ANTI-CHURN: Stop-Trading if daily limit reached
+        if self.daily_trades_count[symbol] >= self.MAX_TRADES_PER_SYMBOL:
+            return None
 
-        # --------- SCORE ---------
-        footprint = features.get("footprint_score", 0)
-        imbalance = features.get("bid_ask_imbalance", 0)
-        momentum = features.get("momentum_ignition", 0)
+        # 2. VOLATILITY FILTER: Handled dynamically in position sizing (_build_decision)
+        # instead of starving the funnel by blocking it.
 
-        score = (
-            (footprint > 60) * 0.25 +
-            (abs(imbalance) > 0.5) * 0.25 +
-            (momentum > 50) * 0.15
-        )
+        # 3. CONVICTION SCORING
+        score = signal.get("score", 0) / 100.0 if "score" in signal else 0.0
+        if not score:
+            footprint = features.get("footprint_score", 0)
+            imbalance = features.get("bid_ask_imbalance", 0)
+            momentum = features.get("momentum_ignition", 0)
+            score = ((footprint > 60) * 0.25 + (abs(imbalance) > 0.5) * 0.25 + (momentum > 50) * 0.15)
+            if features.get("vwap_rejection"): score += 0.15
+            if features.get("vol_spike"): score += 0.10
 
-        # VWAP/VWMA feature bonuses
-        if features.get("vwap_rejection"):
-            score += 0.15
-        if features.get("vol_spike"):
-            score += 0.10
-        if features.get("regime") in ("TRENDING_UP", "TRENDING_DOWN"):
-            score += 0.05
+        side = signal.get("side") or signal.get("signal", "BUY")
 
-        # Override score if signal already gives it (stock engine / scanner / vwap_retest)
-        if "score" in signal:
-            score = signal["score"] / 100.0
+        # Block shorting for cash equity symbols (ends with -EQ)
+        if (side == "SELL" or side == "SHORT") and symbol.endswith("-EQ"):
+            print(f"🚫 MDE BLOCK | Shorting cash equity is disabled: {symbol}")
+            return None
 
-        # ─── Normalize Side ──────────────────────────────
-        side = signal.get("side") or signal.get("signal")
-        if not side:
-            # Fallback to imbalance if side is missing
-            side = "BUY" if imbalance > 0 else "SELL"
+        # 4. STATE-OF-THE-ART REGIME ALIGNMENT
+        is_convergent = (self.intraday_regime in ("TRENDING_UP", "TRENDING_DOWN") and 
+                         self.index_direction in ("BULLISH_CONVERGENCE", "BEARISH_CONVERGENCE"))
 
-        # ━━━ TRENDING DAY AGGRESSIVE BYPASS ━━━━━━━━━━━━━━━━━━
-        # On clear trending days with index convergence, lower the bar significantly
-        # This is the "Golden Opportunity" mode for trending markets
-        is_trending_convergence = (
-            self.intraday_regime in ("TRENDING_UP", "TRENDING_DOWN") and
-            self.index_direction in ("BULLISH_CONVERGENCE", "BEARISH_CONVERGENCE")
-        )
+        # Tightened threshold to solve your 3k profit/40 trade issue
+        min_score = 0.72 if is_convergent else 0.85 # High bar for autonomous mode
         
-        if is_trending_convergence:
-            # Auto-align side with trend direction
-            trend_side = "BUY" if self.intraday_regime == "TRENDING_UP" else "SELL"
-            if side == trend_side:
-                # Dramatically lower the bar for trend-aligned signals
-                min_score = 0.45 if is_index else 0.50
-                if score >= min_score:
-                    print(f"🔥 TRENDING CONVERGENCE BYPASS | {symbol} {side} | score={score:.2f} >= {min_score}")
-                    # Skip all other regime filters — go straight to portfolio check
-                    return self._build_decision(symbol, side, score, signal, is_index, features)
-
-        # Threshold: 0.60 for index, 0.55 for stock (lowered from 0.70/0.65)
-        min_score = 0.60 if is_index else 0.55
         if score < min_score:
             return None
 
-        # ─── Counter-trend filter (soft — only block index counter-trend) ─
-        if is_index:
-            if self.intraday_regime == "TRENDING_DOWN" and side == "BUY":
-                return None
-            if self.intraday_regime == "TRENDING_UP" and side == "SELL":
-                return None
-
-        # ─── DUAL-INDEX DIRECTION FILTER (Relaxed for trading) ──
-        if self.index_direction == "BEARISH_CONVERGENCE" and side == "BUY":
-            if is_index or score < 0.65:
-                return None
-
-        if self.index_direction == "BULLISH_CONVERGENCE" and side == "SELL":
-            if is_index or score < 0.65:
-                return None
-
-        if self.index_direction == "DIVERGENCE":
-            if is_index and score < 0.75:
+        # 5. SYMBOL-LEVEL PNL COOLDOWN
+        # Wait longer if the last trade was a loser to prevent revenge trading
+        if symbol in self.closed_cooldown:
+            # Assuming you pass pnl in closed_cooldown dictionary in future, fallback to 15m if not
+            cooldown_time = 900 # 15 mins default
+            if isinstance(self.closed_cooldown[symbol], dict):
+                last_exit_pnl = self.closed_cooldown[symbol].get("pnl", 0)
+                if last_exit_pnl < 0:
+                    cooldown_time = 3600 # 1 hour penalty for a losing setup
+                
+            # If closed_cooldown stores datetime directly
+            close_time = self.closed_cooldown[symbol]
+            if isinstance(close_time, dict): close_time = close_time.get('time', datetime.utcnow())
+                
+            elapsed = (datetime.utcnow() - close_time).total_seconds()
+            if elapsed < cooldown_time:
                 return None
 
         return self._build_decision(symbol, side, score, signal, is_index, features)
 
     def _build_decision(self, symbol, side, score, signal, is_index, features):
         """Build the final decision dict with capital allocation and portfolio checks."""
+        # Retrieve current capital dynamically from Redis if available to ensure sync with RiskEngine
+        try:
+            stored_cap = self.redis.get_hashall("system_config").get("current_capital")
+            if stored_cap:
+                self.capital = float(stored_cap)
+        except Exception:
+            pass
+
         # ─────── CAPITAL ALLOCATION ─────────
-        if self.intraday_regime in ("TRENDING_UP", "TRENDING_DOWN"):
-            self.index_allocation = 0.6
-            self.stock_allocation = 0.4
-        elif self.intraday_regime == "VOLATILE":
-            self.index_allocation = 0.3
-            self.stock_allocation = 0.3
-        else:
-            self.index_allocation = 0.4
-            self.stock_allocation = 0.6
-
-        if is_index:
-            capital = self.capital * self.index_allocation
-        else:
-            capital = self.capital * self.stock_allocation
-
+        # Allocate capital per position based on MAX_POSITIONS (was risk percentage-of-capital, causing tiny trades)
+        base_position_size = self.capital / max(1, self.MAX_POSITIONS)
+        
+        position_size = base_position_size
         if self.in_drawdown:
-            capital *= 0.5
+            position_size *= 0.5
         if self.intraday_regime == "VOLATILE":
-            capital *= 0.7
+            position_size *= 0.7
 
         if self.vix_proxy > 40:
-            capital *= 0.5
+            position_size *= 0.5
         elif self.vix_proxy > 25:
-            capital *= 0.7
+            position_size *= 0.7
 
         if self.index_direction == "DIVERGENCE":
-            capital *= 0.6
+            position_size *= 0.6
 
-        # ─── SMART POSITION SIZING ───
-        risk_per_trade = 0.01
-        if self.intraday_regime in ("TRENDING_UP", "TRENDING_DOWN") and self.index_direction in ("BULLISH_CONVERGENCE", "BEARISH_CONVERGENCE"):
-            risk_per_trade = 0.02
-            print(f"🔥 ALL THROTTLE IN | Trending Day ({self.index_direction}) | Doubling size for {symbol}")
+        # Dynamic Volatility Wall Scaling
+        atr_ratio = features.get("atr_ratio", 1.0)
+        if atr_ratio < 0.8 and self.intraday_regime in ("NEUTRAL", "RANGE", "RANGE_BOUND"):
+            position_size *= 0.5
+            print(f"📉 VOLATILITY WALL SCALING | Regime: {self.intraday_regime} | atr_ratio: {atr_ratio} < 0.8 | Scaling position size by 0.5")
 
-        position_size = capital * risk_per_trade
-        qty = max(10, int(position_size / signal.get("price", 1)))
+        # Enforce a minimum position size of Rs 50,000 to cover transactional charges (Rs 200+)
+        position_size = max(50000.0, position_size)
+        qty = int(position_size / signal.get("price", 1))
+        qty = max(10, qty)
 
         # --------- PORTFOLIO CHECK ---------
         if len(self.active_positions) >= self.MAX_POSITIONS:
             return None
         if symbol in self.active_positions:
             return None
-        if symbol in self.closed_cooldown:
-            elapsed = (datetime.utcnow() - self.closed_cooldown[symbol]).total_seconds()
-            if elapsed < self.COOLDOWN_SECONDS:
-                return None
 
         strategy = signal.get("strategy", "INDEX" if is_index else "STOCK")
 
@@ -362,9 +352,10 @@ class MasterDecisionEngine:
             "strategy": strategy,
             "source": signal.get("source", ""),
             "timestamp": datetime.utcnow().isoformat(),
-            "features": features
+            "features": features.to_dict() if hasattr(features, "to_dict") else features
         }
 
+        self.daily_trades_count[symbol] += 1
         self.active_positions[symbol] = decision
 
         regime_tag = f" | Regime: {self.intraday_regime}" if self.intraday_regime != "NEUTRAL" else ""

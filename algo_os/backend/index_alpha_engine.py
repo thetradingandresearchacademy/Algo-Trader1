@@ -42,7 +42,7 @@ class IndexAlphaEngine:
 
         # Signal cooldown (3 min per symbol)
         self.last_signal_time = {}
-        self.COOLDOWN_SECONDS = 180
+        self.COOLDOWN_SECONDS = 300
 
         # Regime state
         self.current_regime = "NEUTRAL"
@@ -145,13 +145,6 @@ class IndexAlphaEngine:
             score += self.weights.get("accumulation", 0.15)
         if f.get("compression_ratio", 1) < 0.4:
             score += self.weights.get("volatility", 0.15)
-        
-        # Fallback for basic trending data (ensures we trade even if advanced features are missing)
-        if score == 0:
-            # If we are in a clear regime and price is on the right side of VWAP
-            is_index = f.get("symbol") in ("NIFTY", "BANKNIFTY", "SENSEX")
-            if is_index and self.current_regime != "NEUTRAL":
-                score += 0.50 # Strong baseline for being in a regime (was 0.40)
                 
         return score
 
@@ -257,19 +250,13 @@ class IndexAlphaEngine:
             total_score *= 0.8  # Reduce confidence in volatile regime
         total_score += regime_bonus
 
-        # ─── Final Signal Decision ───────────────────────
-        MIN_SCORE = 0.50 # Lowered from 0.65 to capture more trending-day moves
-        vwap_tag = ""
-
-        if total_score < MIN_SCORE:
-            return None
-
         # ─── Trend Continuation Logic (For BIG Trending Days) ───
         is_trending_buy = (self.current_regime == "TRENDING_UP" and price > vwma and vwma_slope > 0.0001)
         is_trending_sell = (self.current_regime == "TRENDING_DOWN" and price < vwma and vwma_slope < -0.0001)
 
         # Determine side
         side = None
+        vwap_tag = ""
 
         # BUY conditions: VWAP bounce OR strong imbalance OR trend continuation
         if vwap_rejection_buy or imbalance > 0.5 or is_trending_buy:
@@ -300,6 +287,19 @@ class IndexAlphaEngine:
             if price < vwma: total_score += 0.15
 
         if side is None:
+            return None
+
+        # ─── Final Signal Decision (Now evaluated after VWMA bonus) ───
+        # Regime-aware quality gate: NEUTRAL/VOLATILE days need higher conviction
+        # to prevent signal factory behavior (17k+ signals on flat days)
+        if self.current_regime in ("TRENDING_UP", "TRENDING_DOWN"):
+            MIN_SCORE = 0.72  # Trending: aligned with MDE threshold
+        elif self.current_regime == "VOLATILE":
+            MIN_SCORE = 0.78  # Volatile: cautious
+        else:
+            MIN_SCORE = 0.80  # NEUTRAL: only high-conviction signals
+
+        if total_score < MIN_SCORE:
             return None
 
         # Volume confirmation bonus

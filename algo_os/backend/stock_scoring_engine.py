@@ -136,7 +136,7 @@ class StockScoringEngine:
             signal_type = "STRONG BUY" if score >= 85 else "BUY"
             
             # Simple state tracking to avoid duplicate signals (rate-limiting at source)
-            if symbol not in self.stock_states or (datetime.now() - self.stock_states[symbol]).seconds > 60:
+            if symbol not in self.stock_states or (datetime.now() - self.stock_states[symbol]).total_seconds() > 600:
                 self.stock_states[symbol] = datetime.now()
                 self._publish_signal(symbol, signal_type, price, score, swing_low, monthly_vwap)
                 
@@ -146,6 +146,7 @@ class StockScoringEngine:
             "signal": side,
             "price": price,
             "score": score,
+            "source": "stock_scoring",
             "timestamp": datetime.utcnow().isoformat(),
             "features": {
                 "swing_low": round(swing_low, 2) if swing_low else None,

@@ -213,24 +213,64 @@ class StockVWAPRetestEngine:
         if not token:
             return None
 
-        # Fetch 60-day daily candles for Monthly VWAP calculation
-        now = datetime.now()
-        raw = self._api_fetch({
-            "exchange": "NSE",
-            "symboltoken": token,
-            "interval": "ONE_DAY",
-            "fromdate": (now - timedelta(days=60)).strftime('%Y-%m-%d 09:15'),
-            "todate": now.strftime('%Y-%m-%d 15:30')
-        }, symbol)
+        # 1. Fetch historical candles from local DB (market_data.ohlcv)
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host="127.0.0.1",
+                database="market_data",
+                user="postgres",
+                password=sys_config.POSTGRES_PASSWORD_RAW
+            )
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT open, high, low, close, volume, date FROM ohlcv 
+                WHERE symbol = %s 
+                ORDER BY date DESC 
+                LIMIT 60
+            """, (symbol,))
+            rows = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            print(f"⚠️ VWAP Retest DB query error for {symbol}: {e}")
+            rows = []
 
-        if not raw or len(raw) < 20:
+        if not rows:
             return None
 
-        df = pd.DataFrame(raw, columns=['date', 'open', 'high', 'low', 'close', 'volume'])
-        df['close'] = df['close'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['low'] = df['low'].astype(float)
+        # Reverse to get chronological order (ASC)
+        rows.reverse()
+        hist_df = pd.DataFrame(rows, columns=['open', 'high', 'low', 'close', 'volume', 'date'])
+        
+        # Convert types
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            hist_df[col] = hist_df[col].astype(float)
+
+        # 2. Fetch today's live candle using getMarketData (extremely fast, no historical rate limits)
+        live = None
+        try:
+            resp = self.broker.api.getMarketData("FULL", {"NSE": [token]})
+            if resp and resp.get("status") and resp.get("data") and resp["data"].get("fetched"):
+                item = resp["data"]["fetched"][0]
+                live = {
+                    "open": float(item.get("open", 0.0)),
+                    "high": float(item.get("high", 0.0)),
+                    "low": float(item.get("low", 0.0)),
+                    "close": float(item.get("ltp", 0.0)),
+                    "volume": float(item.get("tradeVolume", 0.0)),
+                    "date": datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+                }
+        except Exception as e:
+            print(f"⚠️ VWAP Retest live fetch error for {symbol}: {e}")
+
+        if live:
+            live_df = pd.DataFrame([live])
+            df = pd.concat([hist_df, live_df]).drop_duplicates(subset=['date']).reset_index(drop=True)
+        else:
+            df = hist_df
+
+        if df.empty or len(df) < 20:
+            return None
 
         ltp = float(df.iloc[-1]['close'])
 

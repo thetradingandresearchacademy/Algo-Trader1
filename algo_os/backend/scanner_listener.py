@@ -36,6 +36,7 @@ class ScannerListenerEngine:
         self._scan_count = 0
         self._last_scan_time = None
         self._consecutive_failures = 0
+        self._last_signaled = {}
 
         self.db_pass = getattr(config, "DB_PASS", "tara123") if 'config' in globals() else "tara123"
 
@@ -44,6 +45,34 @@ class ScannerListenerEngine:
         
         self.setup_db()
         
+        # Extract and publish watchlist immediately on startup from DB cache
+        try:
+            watchlist, bias = self.extract_watchlist()
+            if watchlist:
+                symbol_names = [s["symbol"] for s in watchlist]
+                payload = {
+                    "symbols": symbol_names,
+                    "bias": bias,
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "source": "apex_scanner"
+                }
+                await self.redis.publish(self.output_stream, payload)
+                print(f"ScannerListener: Published initial watchlist of {len(symbol_names)} symbols on startup")
+                
+                # Generate direct signals from existing watchlist
+                signals_generated = 0
+                for stock in watchlist:
+                    if stock.get("score", 0) >= 1 and stock.get("last_price", 0) > 0:
+                        symbol = stock.get("symbol")
+                        signal = self._create_signal_from_scan(stock)
+                        if signal:
+                            await self.redis.publish(self.signal_stream, signal)
+                            signals_generated += 1
+                if signals_generated > 0:
+                    print(f"🚀 ScannerListener: Published {signals_generated} initial trading signals on startup")
+        except Exception as e:
+            print(f"⚠️ ScannerListener: Initial watchlist load failed: {e}")
+
         # Start command listener for UI interaction
         asyncio.create_task(self.listen_for_commands())
         asyncio.create_task(self._heartbeat_logger())
@@ -96,8 +125,14 @@ class ScannerListenerEngine:
                     signals_generated = 0
                     for stock in watchlist:
                         if stock.get("score", 0) >= 1 and stock.get("last_price", 0) > 0:
+                            symbol = stock.get("symbol")
+                            now = datetime.now()
+                            # 10-minute per-symbol cooldown to prevent signal storming
+                            if symbol in self._last_signaled and (now - self._last_signaled[symbol]).total_seconds() < 600:
+                                continue
                             signal = self._create_signal_from_scan(stock)
                             if signal:
+                                self._last_signaled[symbol] = now
                                 await self.redis.publish(self.signal_stream, signal)
                                 signals_generated += 1
                     
@@ -189,7 +224,7 @@ class ScannerListenerEngine:
             "symbol": symbol,
             "side": side,
             "price": last_price,
-            "score": min(score * 40 + 20, 100),  # 1 conf=60, 2=100 (capped)
+            "score": min(score * 15 + 70, 100),  # 1 conf=85, 2=100 (capped)
             "timestamp": datetime.utcnow().isoformat(),
             "source": "apex_scanner",
             "features": {
