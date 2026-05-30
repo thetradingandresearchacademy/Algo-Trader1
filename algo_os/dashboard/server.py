@@ -691,6 +691,143 @@ async def get_performance_stats():
 
 from datetime import datetime, timedelta, timezone
 
+# ══════════════════════════════════════════════════════════════
+# AI APPROVED TRADES — Full Journal + Self-Analytics
+# ══════════════════════════════════════════════════════════════
+
+@app.get("/api/ai-trades/journal", include_in_schema=False)
+async def get_ai_trades_journal(range: str = "today"):
+    """AI Approved Trades journal with self-analytics.
+    range: 'today' | 'yesterday' | 'week' | 'month' | 'all'
+    """
+    try:
+        ist = timezone(timedelta(hours=5, minutes=30))
+        now = datetime.now(ist)
+
+        if range == "today":
+            where = f"WHERE created_at::date = '{now.strftime('%Y-%m-%d')}'"
+            label = f"Today ({now.strftime('%d %b %Y')})"
+        elif range == "yesterday":
+            yd = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+            where = f"WHERE created_at::date = '{yd}'"
+            label = f"Yesterday ({yd})"
+        elif range == "week":
+            ws = (now - timedelta(days=now.weekday())).strftime('%Y-%m-%d')
+            where = f"WHERE created_at::date >= '{ws}'"
+            label = f"This Week (from {ws})"
+        elif range == "month":
+            ms = now.replace(day=1).strftime('%Y-%m-%d')
+            where = f"WHERE created_at::date >= '{ms}'"
+            label = f"This Month ({now.strftime('%b %Y')})"
+        else:
+            where = ""
+            label = "All Time"
+
+        conn = psycopg2.connect(
+            host="127.0.0.1", database=sys_config.POSTGRES_DB_RAW,
+            user="postgres", password=sys_config.POSTGRES_PASSWORD_RAW
+        )
+        cur = conn.cursor()
+
+        # 1. Trade list with IST timestamps
+        cur.execute(f"""
+            SELECT id, strategy_id, instrument_id, direction, entry_price, exit_price,
+                   net_pnl, exit_reason, qty,
+                   created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata' as ist_time
+            FROM algo_trades {where}
+            ORDER BY created_at DESC LIMIT 500
+        """)
+        rows = cur.fetchall()
+
+        trades = []
+        for r in rows:
+            entry = float(r[4]) if r[4] else 0
+            exit_p = float(r[5]) if r[5] else 0
+            pnl = float(r[6]) if r[6] else 0
+            qty = r[8] or 0
+            if r[3] == 'BUY':
+                est_sl = round(entry * 0.99, 2)
+                est_target = round(entry * 1.02, 2)
+            else:
+                est_sl = round(entry * 1.01, 2)
+                est_target = round(entry * 0.98, 2)
+
+            trades.append({
+                "id": r[0], "strategy": r[1] or "AUTO", "symbol": r[2],
+                "side": r[3], "entry_price": entry, "exit_price": exit_p,
+                "pnl": pnl, "reason": r[7] or "SYSTEM", "qty": qty,
+                "sl": est_sl, "target": est_target,
+                "status": "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN"),
+                "timestamp": r[9].strftime("%Y-%m-%d %H:%M:%S IST") if r[9] else None
+            })
+
+        # 2. Summary stats
+        cur.execute(f"""
+            SELECT COUNT(*), COALESCE(SUM(net_pnl),0),
+                   COALESCE(SUM(CASE WHEN net_pnl > 0 THEN 1 ELSE 0 END),0),
+                   COALESCE(SUM(CASE WHEN net_pnl <= 0 THEN 1 ELSE 0 END),0),
+                   COALESCE(AVG(net_pnl),0), COALESCE(MAX(net_pnl),0), COALESCE(MIN(net_pnl),0),
+                   COALESCE(AVG(CASE WHEN net_pnl > 0 THEN net_pnl END), 0),
+                   COALESCE(AVG(CASE WHEN net_pnl < 0 THEN net_pnl END), 0)
+            FROM algo_trades {where}
+        """)
+        s = cur.fetchone()
+        total = s[0] or 0
+        wins = int(s[2]) if s[2] else 0
+        losses = int(s[3]) if s[3] else 0
+        win_rate = round((wins / total * 100), 1) if total > 0 else 0
+        gp = float(s[7]) * wins if s[7] else 0
+        gl = abs(float(s[8]) * losses) if s[8] else 0
+        pf = round(gp / gl, 2) if gl > 0 else (99.0 if gp > 0 else 0)
+
+        # 3. Strategy breakdown
+        cur.execute(f"""
+            SELECT strategy_id, COUNT(*), ROUND(SUM(net_pnl)::numeric, 2),
+                   ROUND(SUM(CASE WHEN net_pnl>0 THEN 1 ELSE 0 END)::numeric / NULLIF(COUNT(*),0)*100, 1)
+            FROM algo_trades {where} GROUP BY strategy_id ORDER BY SUM(net_pnl) DESC
+        """)
+        strategies = [{"name": r[0] or "AUTO", "trades": r[1], "pnl": float(r[2]), "win_rate": float(r[3])} for r in cur.fetchall()]
+
+        # 4. Hourly heatmap (IST)
+        cur.execute(f"""
+            SELECT EXTRACT(HOUR FROM created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::int as hr,
+                   COUNT(*), ROUND(SUM(net_pnl)::numeric, 2), ROUND(AVG(net_pnl)::numeric, 2)
+            FROM algo_trades {where} GROUP BY hr ORDER BY hr
+        """)
+        hourly = [{"hour": r[0], "trades": r[1], "pnl": float(r[2]), "avg": float(r[3])} for r in cur.fetchall()]
+
+        # 5. Daily trend
+        daily = []
+        if range in ("week", "month", "all"):
+            cur.execute(f"""
+                SELECT (created_at AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Kolkata')::date as d,
+                       COUNT(*), ROUND(SUM(net_pnl)::numeric, 2),
+                       SUM(CASE WHEN net_pnl>0 THEN 1 ELSE 0 END)
+                FROM algo_trades {where} GROUP BY d ORDER BY d DESC LIMIT 30
+            """)
+            daily = [{"date": str(r[0]), "trades": r[1], "pnl": float(r[2]), "wins": int(r[3])} for r in cur.fetchall()]
+
+        conn.close()
+
+        return {
+            "status": "success", "label": label, "range": range,
+            "trades": trades,
+            "summary": {
+                "total_trades": total, "total_pnl": round(float(s[1]), 2),
+                "wins": wins, "losses": losses, "win_rate": win_rate,
+                "avg_pnl": round(float(s[4]), 2),
+                "best_trade": round(float(s[5]), 2), "worst_trade": round(float(s[6]), 2),
+                "avg_winner": round(float(s[7]), 2) if s[7] else 0,
+                "avg_loser": round(float(s[8]), 2) if s[8] else 0,
+                "profit_factor": pf,
+            },
+            "strategies": strategies,
+            "hourly_heatmap": hourly,
+            "daily_trend": daily,
+        }
+    except Exception as e:
+        return {"status": "error", "trades": [], "summary": {}, "error": str(e)}
+
 def _get_today_id():
     """Compute fresh today_id every call to handle day-boundary transitions."""
     ist = timezone(timedelta(hours=5, minutes=30))
